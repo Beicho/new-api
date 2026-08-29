@@ -63,6 +63,7 @@ import {
   Replicate,
   Poe,
   Cerebras,
+  Vercel,
 } from '@lobehub/icons';
 
 import {
@@ -76,6 +77,7 @@ import {
   CheckSquare,
   CreditCard,
   Layers,
+  Cloud,
   Gift,
   User,
   Settings,
@@ -368,6 +370,11 @@ export function getChannelIcon(channelType) {
       return <DeepSeek.Color size={iconSize} />;
     case 62: // Cerebras
       return <Cerebras.Color size={iconSize} />;
+    case 66: // Vercel AI Gateway
+      return <Vercel size={iconSize} />;
+    case 67: // GMI Cloud
+    case 68: // VyceAI
+      return <Cloud size={iconSize} />;
     case 63: // OpenCode Zen
     case 64: // OpenCode Go
       return <Layers size={iconSize} />;

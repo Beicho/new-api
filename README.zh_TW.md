@@ -125,14 +125,14 @@ docker-compose up -d
 
 ```bash
 # 拉取最新鏡像
-docker pull calciumion/new-api:latest
+docker pull ghcr.io/futureppo/new-api:latest
 
 # 使用 SQLite（預設）
 docker run --name new-api -d --restart always \
   -p 3000:3000 \
   -e TZ=Asia/Shanghai \
   -v ./data:/data \
-  calciumion/new-api:latest
+  ghcr.io/futureppo/new-api:latest
 
 # 使用 MySQL
 docker run --name new-api -d --restart always \
@@ -140,7 +140,7 @@ docker run --name new-api -d --restart always \
   -e SQL_DSN="root:123456@tcp(localhost:3306)/oneapi" \
   -e TZ=Asia/Shanghai \
   -v ./data:/data \
-  calciumion/new-api:latest
+  ghcr.io/futureppo/new-api:latest
 ```
 
 > **💡 提示：** `-v ./data:/data` 會將數據保存在當前目錄的 `data` 資料夾中，你也可以改為絕對路徑如 `-v /your/custom/path:/data`
@@ -291,7 +291,7 @@ docker run --name new-api -d --restart always \
 ## 🚢 部署
 
 > [!TIP]
-> **最新版 Docker 鏡像：** `calciumion/new-api:latest`
+> **最新版 Docker 鏡像：** `ghcr.io/futureppo/new-api:latest`
 
 ### 📋 部署要求
 
@@ -300,6 +300,8 @@ docker run --name new-api -d --restart always \
 | **本地資料庫** | SQLite（Docker 需掛載 `/data` 目錄）|
 | **遠端資料庫** | MySQL ≥ 5.7.8 或 PostgreSQL ≥ 9.6 |
 | **容器引擎** | Docker / Docker Compose |
+
+> **資料庫建議：** 新部署推薦優先使用 PostgreSQL。
 
 ### ⚙️ 環境變數配置
 
@@ -357,7 +359,7 @@ docker run --name new-api -d --restart always \
   -p 3000:3000 \
   -e TZ=Asia/Shanghai \
   -v ./data:/data \
-  calciumion/new-api:latest
+  ghcr.io/futureppo/new-api:latest
 ```
 
 **使用 MySQL：**
@@ -367,7 +369,7 @@ docker run --name new-api -d --restart always \
   -e SQL_DSN="root:123456@tcp(localhost:3306)/oneapi" \
   -e TZ=Asia/Shanghai \
   -v ./data:/data \
-  calciumion/new-api:latest
+  ghcr.io/futureppo/new-api:latest
 ```
 
 > **💡 路徑說明：**
