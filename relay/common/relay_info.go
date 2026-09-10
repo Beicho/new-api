@@ -315,6 +315,7 @@ func (info *RelayInfo) ToString() string {
 
 // 定义支持流式选项的通道类型
 var streamSupportedChannels = map[int]bool{
+	constant.ChannelTypeAgnesAI:     true, // Verified with stream_options.include_usage on 2026-09-10.
 	constant.ChannelTypeOpenAI:      true,
 	constant.ChannelTypeAnthropic:   true,
 	constant.ChannelTypeAws:         true,
@@ -712,7 +713,8 @@ type TaskRelayInfo struct {
 	OriginTaskID string
 	// PublicTaskID 是提交时预生成的 task_xxxx 格式公开 ID，
 	// 供 DoResponse 在返回给客户端时使用（避免暴露上游真实 ID）。
-	PublicTaskID string
+	PublicTaskID    string
+	UpstreamVideoID string
 
 	ConsumeQuota bool
 

@@ -5,15 +5,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	channelconstant "github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/relay/channel"
+	"github.com/QuantumNous/new-api/relay/channel/claude"
 	"github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
 )
@@ -23,12 +28,12 @@ type Adaptor struct {
 }
 
 type imageRequest struct {
-	Model        string          `json:"model"`
-	Prompt       string          `json:"prompt"`
-	Size         string          `json:"size,omitempty"`
-	Image        []string        `json:"image,omitempty"`
-	ReturnBase64 json.RawMessage `json:"return_base64,omitempty"`
-	ExtraBody    map[string]any  `json:"extra_body,omitempty"`
+	Model        string         `json:"model"`
+	Prompt       string         `json:"prompt"`
+	Size         string         `json:"size"`
+	Ratio        *string        `json:"ratio,omitempty"`
+	ReturnBase64 *bool          `json:"return_base64,omitempty"`
+	ExtraBody    map[string]any `json:"extra_body,omitempty"`
 }
 
 func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) (any, error) {
@@ -47,22 +52,66 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 }
 
 func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
-	if info != nil && info.RelayMode == relayconstant.RelayModeImagesEdits {
-		baseURL := info.ChannelBaseUrl
-		if baseURL == "" {
-			baseURL = channelconstant.ChannelBaseURLs[channelconstant.ChannelTypeAgnesAI]
-		}
-		return relaycommon.GetFullRequestURL(baseURL, "/v1/images/generations", info.ChannelType), nil
+	if info == nil || info.ChannelMeta == nil {
+		return "", errors.New("relay info is nil")
 	}
-	return a.Adaptor.GetRequestURL(info)
+	path := info.RequestURLPath
+	if info.RelayFormat == types.RelayFormatClaude {
+		path = "/v1/messages"
+	} else if info.RelayMode == relayconstant.RelayModeImagesEdits {
+		path = "/v1/images/generations"
+	}
+	return NormalizeBaseURL(info.ChannelBaseUrl) + path, nil
+}
+
+// NormalizeBaseURL accepts the API root or the /v1 base used by official SDKs.
+func NormalizeBaseURL(base string) string {
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
+	if base == "" {
+		return channelconstant.ChannelBaseURLs[channelconstant.ChannelTypeAgnesAI]
+	}
+	return strings.TrimSuffix(base, "/v1")
+}
+
+func (a *Adaptor) ConvertOpenAIRequest(_ *gin.Context, _ *relaycommon.RelayInfo, request *dto.GeneralOpenAIRequest) (any, error) {
+	if request == nil {
+		return nil, errors.New("request is nil")
+	}
+	return request, nil
+}
+
+func (a *Adaptor) ConvertClaudeRequest(_ *gin.Context, _ *relaycommon.RelayInfo, request *dto.ClaudeRequest) (any, error) {
+	if request == nil {
+		return nil, errors.New("request is nil")
+	}
+	return request, nil
+}
+
+func (a *Adaptor) ConvertOpenAIResponsesRequest(_ *gin.Context, _ *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
+	return &request, nil
+}
+
+// Dispatch through this adaptor so image and Messages URL/header overrides apply.
+func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, body io.Reader) (any, error) {
+	return channel.DoApiRequest(a, c, info, body)
+}
+
+func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (any, *types.NewAPIError) {
+	if info.RelayFormat == types.RelayFormatClaude {
+		return (&claude.Adaptor{}).DoResponse(c, resp, info)
+	}
+	return a.Adaptor.DoResponse(c, resp, info)
 }
 
 func (a *Adaptor) SetupRequestHeader(c *gin.Context, header *http.Header, info *relaycommon.RelayInfo) error {
+	if info == nil || info.ChannelMeta == nil {
+		return errors.New("relay info is nil")
+	}
+	if info.RelayFormat == types.RelayFormatClaude {
+		return (&claude.Adaptor{}).SetupRequestHeader(c, header, info)
+	}
 	if err := a.Adaptor.SetupRequestHeader(c, header, info); err != nil {
 		return err
-	}
-	if info == nil {
-		return nil
 	}
 	switch info.RelayMode {
 	case relayconstant.RelayModeImagesGenerations, relayconstant.RelayModeImagesEdits:
@@ -80,8 +129,8 @@ func (a *Adaptor) GetChannelName() string {
 }
 
 func convertImageRequest(info *relaycommon.RelayInfo, request dto.ImageRequest, requireImage bool) (any, error) {
-	if request.N != nil && *request.N > 1 {
-		return nil, errors.New("agnes image API does not support n > 1")
+	if request.N != nil && *request.N != 1 {
+		return nil, errors.New("agnes image API only supports n = 1")
 	}
 
 	modelName := strings.TrimSpace(request.Model)
@@ -97,16 +146,49 @@ func convertImageRequest(info *relaycommon.RelayInfo, request dto.ImageRequest, 
 		return nil, err
 	}
 	if requireImage && len(images) == 0 {
-		return nil, errors.New("agnes image edits require an image URL in image or extra_body.image; file uploads are not supported")
+		return nil, errors.New("agnes image edits require an image URL or Data URI in image or extra_body.image; file uploads are not supported")
+	}
+	if len(images) > 0 {
+		if extraBody == nil {
+			extraBody = make(map[string]any)
+		}
+		extraBody["image"] = images
+	}
+	var returnBase64 *bool
+	if raw := getRawExtra(request, "return_base64"); raw != nil {
+		if err := common.Unmarshal(raw, &returnBase64); err != nil {
+			return nil, errors.New("return_base64 must be a boolean")
+		}
+	}
+	var ratio *string
+	if raw := getRawExtra(request, "ratio"); raw != nil {
+		if err := common.Unmarshal(raw, &ratio); err != nil {
+			return nil, errors.New("ratio must be a string")
+		}
+		if ratio != nil && !validImageRatio(*ratio) {
+			return nil, errors.New("unsupported image ratio")
+		}
+	}
+	size := strings.TrimSpace(request.Size)
+	if size == "" {
+		size = "1K"
+		if modelName == ModelImage20Flash {
+			size = "1024x1024"
+		}
 	}
 
 	converted := imageRequest{
 		Model:        modelName,
 		Prompt:       request.Prompt,
-		Size:         request.Size,
-		Image:        images,
-		ReturnBase64: getRawExtra(request, "return_base64"),
+		Size:         size,
+		Ratio:        ratio,
+		ReturnBase64: returnBase64,
 		ExtraBody:    extraBody,
+	}
+	if info != nil {
+		// A retried request may carry ratios from another provider. Agnes image
+		// calls always use one fixed charge, independent of media parameters.
+		info.PriceData.OtherRatios = map[string]float64{"n": 1}
 	}
 
 	return converted, nil
@@ -127,6 +209,9 @@ func buildImageFields(request dto.ImageRequest) (map[string]any, []string, error
 					continue
 				}
 				if key == "image" {
+					if len(bytes.TrimSpace(request.Image)) > 0 {
+						continue // The explicit top-level input takes precedence.
+					}
 					normalized, ok, err := normalizeImageValue(value)
 					if err != nil {
 						return nil, nil, err
@@ -142,13 +227,11 @@ func buildImageFields(request dto.ImageRequest) (map[string]any, []string, error
 	}
 
 	if len(bytes.TrimSpace(request.Image)) > 0 {
-		normalized, ok, err := normalizeImageValue(request.Image)
+		normalized, _, err := normalizeImageValue(request.Image)
 		if err != nil {
 			return nil, nil, err
 		}
-		if ok {
-			images = normalized
-		}
+		images = normalized
 	}
 
 	if _, ok := extraBody["response_format"]; !ok && strings.TrimSpace(request.ResponseFormat) != "" {
@@ -182,6 +265,11 @@ func normalizeImageValue(raw json.RawMessage) ([]string, bool, error) {
 	var images []string
 	if err := common.Unmarshal(trimmed, &images); err == nil {
 		images = compactStrings(images)
+		for _, input := range images {
+			if !validImageInput(input) {
+				return nil, false, errors.New("image must contain public HTTP URLs or image Data URIs")
+			}
+		}
 		return images, len(images) > 0, nil
 	}
 
@@ -191,10 +279,29 @@ func normalizeImageValue(raw json.RawMessage) ([]string, bool, error) {
 		if image == "" {
 			return nil, false, nil
 		}
+		if !validImageInput(image) {
+			return nil, false, errors.New("image must be an HTTP URL or image Data URI")
+		}
 		return []string{image}, true, nil
 	}
 
 	return nil, false, errors.New("agnes image input must be a URL string or an array of URL strings")
+}
+
+func validImageInput(input string) bool {
+	if strings.HasPrefix(input, "data:image/") {
+		return strings.Contains(input, ";base64,")
+	}
+	u, err := url.Parse(input)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+}
+
+func validImageRatio(ratio string) bool {
+	switch ratio {
+	case "1:1", "3:4", "4:3", "16:9", "9:16", "2:3", "3:2", "21:9":
+		return true
+	}
+	return false
 }
 
 func compactStrings(values []string) []string {

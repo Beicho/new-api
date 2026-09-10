@@ -241,7 +241,7 @@ func TestConvertToOpenAIVideoReturnsStandardDTO(t *testing.T) {
 	require.Equal(t, "https://example.com/result.mp4", metadata["url"])
 }
 
-func TestEstimateAndAdjustBillingUseSeconds(t *testing.T) {
+func TestEstimateAndAdjustBillingRemainPerCall(t *testing.T) {
 	c, _ := newAgnesVideoContext(`{
 		"model": "agnes-video-v2.0",
 		"prompt": "cinematic beach cat",
@@ -253,8 +253,8 @@ func TestEstimateAndAdjustBillingUseSeconds(t *testing.T) {
 	require.Nil(t, taskErr)
 
 	ratios := (&TaskAdaptor{}).EstimateBilling(c, info)
-	require.InDelta(t, 10.041666, ratios["seconds"], 0.000001)
+	require.Empty(t, ratios)
 
 	adjusted := (&TaskAdaptor{}).AdjustBillingOnSubmit(info, []byte(`{"id":"upstream","status":"queued","seconds":"10.0"}`))
-	require.Equal(t, 10.0, adjusted["seconds"])
+	require.Empty(t, adjusted)
 }
