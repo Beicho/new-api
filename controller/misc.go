@@ -95,7 +95,8 @@ func GetStatus(c *gin.Context) {
 		"default_use_auto_group":            setting.DefaultUseAutoGroup,
 		"registration_code_required":        setting.IsRegistrationCodeRequired(),
 		"invite_code_required":              setting.IsInviteCodeRequired(),
-		"domain_email_registration_enabled": common.DomainEmailRegistrationEnabled,
+		"domain_email_no_invite_code":       common.HasEmailDomainRules(common.EmailDomainInviteCodeExemptionList),
+		"domain_email_no_registration_code": common.HasEmailDomainRules(common.EmailDomainRegistrationCodeExemptionList),
 
 		"usd_exchange_rate": operation_setting.USDExchangeRate,
 		"price":             operation_setting.Price,

@@ -206,9 +206,10 @@ func Register(c *gin.Context) {
 		return
 	}
 	affCode := user.AffCode // this code is the inviter's code, not the user's own code
-	domainEmailRegistration := common.EmailVerificationEnabled && common.IsDomainEmailRegistrationAllowed(user.Email)
-	inviteCodeRequired := setting.IsInviteCodeRequired() && !domainEmailRegistration
-	registrationCodeRequired := setting.IsRegistrationCodeRequired() && !domainEmailRegistration
+	inviteCodeExempt := common.EmailVerificationEnabled && common.IsDomainEmailInviteCodeExempt(user.Email)
+	registrationCodeExempt := common.EmailVerificationEnabled && common.IsDomainEmailRegistrationCodeExempt(user.Email)
+	inviteCodeRequired := setting.IsInviteCodeRequired() && !inviteCodeExempt
+	registrationCodeRequired := setting.IsRegistrationCodeRequired() && !registrationCodeExempt
 	inviterId, err := model.ResolveInviterIdByAffCode(affCode, inviteCodeRequired)
 	if err != nil {
 		common.ApiError(c, err)

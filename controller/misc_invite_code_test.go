@@ -34,26 +34,47 @@ func TestGetStatusIncludesInviteCodeRequirement(t *testing.T) {
 	require.Equal(t, true, response.Data["invite_code_required"])
 }
 
-func TestGetStatusIncludesDomainEmailRegistrationSetting(t *testing.T) {
+func TestGetStatusIncludesIndependentDomainEmailExemptionHints(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	original := common.DomainEmailRegistrationEnabled
-	common.DomainEmailRegistrationEnabled = true
+	originalInviteList := common.EmailDomainInviteCodeExemptionList
+	originalRegistrationList := common.EmailDomainRegistrationCodeExemptionList
 	t.Cleanup(func() {
-		common.DomainEmailRegistrationEnabled = original
+		common.EmailDomainInviteCodeExemptionList = originalInviteList
+		common.EmailDomainRegistrationCodeExemptionList = originalRegistrationList
 	})
 
-	recorder := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Request = httptest.NewRequest("GET", "/api/status", nil)
-	GetStatus(ctx)
-
-	var response struct {
-		Success bool                   `json:"success"`
-		Data    map[string]interface{} `json:"data"`
+	for _, tt := range []struct {
+		name             string
+		inviteList       []string
+		registrationList []string
+		inviteHint       bool
+		registrationHint bool
+	}{
+		{"empty", nil, []string{"", " "}, false, false},
+		{"invite only", []string{"invite.test"}, nil, true, false},
+		{"registration only", nil, []string{"registration.test"}, false, true},
+		{"both", []string{"invite.test"}, []string{"registration.test"}, true, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			common.EmailDomainInviteCodeExemptionList = tt.inviteList
+			common.EmailDomainRegistrationCodeExemptionList = tt.registrationList
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = httptest.NewRequest("GET", "/api/status", nil)
+			GetStatus(ctx)
+			var response struct {
+				Success bool                   `json:"success"`
+				Data    map[string]interface{} `json:"data"`
+			}
+			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+			require.True(t, response.Success)
+			require.Equal(t, tt.inviteHint, response.Data["domain_email_no_invite_code"])
+			require.Equal(t, tt.registrationHint, response.Data["domain_email_no_registration_code"])
+			require.NotContains(t, response.Data, "domain_email_registration_enabled")
+			require.NotContains(t, recorder.Body.String(), "invite.test")
+			require.NotContains(t, recorder.Body.String(), "registration.test")
+		})
 	}
-	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
-	require.True(t, response.Success)
-	require.Equal(t, true, response.Data["domain_email_registration_enabled"])
 }
 
 func TestSendEmailVerificationRejectsBlacklistedDomain(t *testing.T) {

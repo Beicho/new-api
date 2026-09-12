@@ -89,8 +89,8 @@ func setupInviteRegistrationControllerTestDB(t *testing.T) *gorm.DB {
 	originalPasswordRegisterEnabled := common.PasswordRegisterEnabled
 	originalEmailVerificationEnabled := common.EmailVerificationEnabled
 	originalEmailCaseInsensitiveEnabled := common.EmailCaseInsensitiveEnabled
-	originalDomainEmailRegistrationEnabled := common.DomainEmailRegistrationEnabled
-	originalDomainEmailRegistrationWhitelist := append([]string(nil), common.DomainEmailRegistrationWhitelist...)
+	originalInviteCodeExemptionList := common.EmailDomainInviteCodeExemptionList
+	originalRegistrationCodeExemptionList := common.EmailDomainRegistrationCodeExemptionList
 	originalEmailDomainBlacklist := append([]string(nil), common.EmailDomainBlacklist...)
 	originalGenerateDefaultToken := constant.GenerateDefaultToken
 	originalQuotaForNewUser := common.QuotaForNewUser
@@ -108,8 +108,8 @@ func setupInviteRegistrationControllerTestDB(t *testing.T) *gorm.DB {
 	common.PasswordRegisterEnabled = true
 	common.EmailVerificationEnabled = false
 	common.EmailCaseInsensitiveEnabled = true
-	common.DomainEmailRegistrationEnabled = false
-	common.DomainEmailRegistrationWhitelist = nil
+	common.EmailDomainInviteCodeExemptionList = nil
+	common.EmailDomainRegistrationCodeExemptionList = nil
 	common.EmailDomainBlacklist = nil
 	constant.GenerateDefaultToken = false
 	common.QuotaForNewUser = 0
@@ -138,8 +138,8 @@ func setupInviteRegistrationControllerTestDB(t *testing.T) *gorm.DB {
 		common.PasswordRegisterEnabled = originalPasswordRegisterEnabled
 		common.EmailVerificationEnabled = originalEmailVerificationEnabled
 		common.EmailCaseInsensitiveEnabled = originalEmailCaseInsensitiveEnabled
-		common.DomainEmailRegistrationEnabled = originalDomainEmailRegistrationEnabled
-		common.DomainEmailRegistrationWhitelist = originalDomainEmailRegistrationWhitelist
+		common.EmailDomainInviteCodeExemptionList = originalInviteCodeExemptionList
+		common.EmailDomainRegistrationCodeExemptionList = originalRegistrationCodeExemptionList
 		common.EmailDomainBlacklist = originalEmailDomainBlacklist
 		constant.GenerateDefaultToken = originalGenerateDefaultToken
 		common.QuotaForNewUser = originalQuotaForNewUser
@@ -301,14 +301,112 @@ func TestGetAffCodeRepairsLegacyCodeAndKeepsV2Code(t *testing.T) {
 	require.Equal(t, first.Data, second.Data)
 }
 
+func TestDomainEmailRegistrationExemptionsAreIndependent(t *testing.T) {
+	for _, tt := range []struct {
+		name             string
+		email            string
+		inviteList       []string
+		registrationList []string
+		provideInvite    bool
+		provideCode      bool
+		verification     string
+		wantMessage      string
+	}{
+		{name: "empty lists require invite", wantMessage: "请输入邀请码"},
+		{name: "empty lists require registration", provideInvite: true, wantMessage: "请输入注册码"},
+		{name: "empty lists allow valid codes", provideInvite: true, provideCode: true},
+		{name: "invite exemption still needs registration", inviteList: []string{"*.trusted.test"}, wantMessage: "请输入注册码"},
+		{name: "invite exemption allows registration code", inviteList: []string{"*.trusted.test"}, provideCode: true},
+		{name: "registration exemption still needs invite", registrationList: []string{"*.trusted.test"}, wantMessage: "请输入邀请码"},
+		{name: "registration exemption allows invite", registrationList: []string{"*.trusted.test"}, provideInvite: true},
+		{name: "different domains invite only", inviteList: []string{"*.trusted.test"}, registrationList: []string{"other.test"}, wantMessage: "请输入注册码"},
+		{name: "different domains registration only", email: "user@other.test", inviteList: []string{"*.trusted.test"}, registrationList: []string{"other.test"}, wantMessage: "请输入邀请码"},
+		{name: "both exemptions retain supplied codes", inviteList: []string{"*.trusted.test"}, registrationList: []string{"*.trusted.test"}, provideInvite: true, provideCode: true},
+		{name: "missing verification", inviteList: []string{"*.trusted.test"}, registrationList: []string{"*.trusted.test"}, verification: "missing", wantMessage: i18n.MsgUserEmailVerificationRequired},
+		{name: "invalid verification", inviteList: []string{"*.trusted.test"}, registrationList: []string{"*.trusted.test"}, verification: "invalid", wantMessage: i18n.MsgUserVerificationCodeError},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			db := setupInviteRegistrationControllerTestDB(t)
+			cfg := setting.GetEnhancementSetting()
+			cfg.InviteCodeRequired = true
+			cfg.RegistrationCodeRequired = true
+			common.EmailVerificationEnabled = true
+			common.EmailDomainInviteCodeExemptionList = tt.inviteList
+			common.EmailDomainRegistrationCodeExemptionList = tt.registrationList
+			inviter := model.User{
+				Username: "inviter", Password: "password123", DisplayName: "inviter",
+				Role: common.RoleCommonUser, Status: common.UserStatusEnabled,
+				AffCode: inviteRegistrationTestCode(t),
+			}
+			require.NoError(t, db.Create(&inviter).Error)
+			code := model.RegistrationCode{
+				Code: "VALID-REGISTRATION", Status: common.RegistrationCodeStatusEnabled,
+				Name: "test", MaxUses: 1, CreatedTime: common.GetTimestamp(),
+			}
+			require.NoError(t, db.Create(&code).Error)
+			email := tt.email
+			if email == "" {
+				email = "user@mail.trusted.test"
+			}
+			common.RegisterVerificationCodeWithKey(common.NormalizeEmailIdentity(email), "123456", common.EmailVerificationPurpose)
+			t.Cleanup(func() {
+				common.DeleteKey(common.NormalizeEmailIdentity(email), common.EmailVerificationPurpose)
+			})
+			payload := gin.H{
+				"username": "domain-user", "password": "password123",
+				"email": email, "verification_code": "123456",
+			}
+			if tt.provideInvite {
+				payload["aff_code"] = inviter.AffCode
+			}
+			if tt.provideCode {
+				payload["registration_code"] = code.Code
+			}
+			if tt.verification == "missing" {
+				delete(payload, "verification_code")
+			} else if tt.verification == "invalid" {
+				payload["verification_code"] = "000000"
+			}
+			response := registerTestUser(t, payload)
+			if tt.wantMessage != "" {
+				require.False(t, response.Success)
+				require.Contains(t, response.Message, tt.wantMessage)
+				requireRegistrationUserMissing(t, db, "domain-user")
+				require.NoError(t, db.First(&code, code.Id).Error)
+				require.Zero(t, code.UsedCount)
+				return
+			}
+			require.True(t, response.Success, response.Message)
+			var user model.User
+			require.NoError(t, db.Where("username = ?", "domain-user").First(&user).Error)
+			require.Equal(t, email, user.Email)
+			if tt.provideInvite {
+				require.Equal(t, inviter.Id, user.InviterId)
+			} else {
+				require.Zero(t, user.InviterId)
+			}
+			require.NoError(t, db.First(&code, code.Id).Error)
+			var usages int64
+			require.NoError(t, db.Model(&model.RegistrationCodeUsage{}).Count(&usages).Error)
+			if tt.provideCode {
+				require.Equal(t, 1, code.UsedCount)
+				require.EqualValues(t, 1, usages)
+			} else {
+				require.Zero(t, code.UsedCount)
+				require.Zero(t, usages)
+			}
+		})
+	}
+}
+
 func TestDomainEmailRegistrationBypassesInviteAndRegistrationCodes(t *testing.T) {
 	db := setupInviteRegistrationControllerTestDB(t)
 	cfg := setting.GetEnhancementSetting()
 	cfg.InviteCodeRequired = true
 	cfg.RegistrationCodeRequired = true
 	common.EmailVerificationEnabled = true
-	common.DomainEmailRegistrationEnabled = true
-	common.DomainEmailRegistrationWhitelist = []string{"*.trusted.test"}
+	common.EmailDomainInviteCodeExemptionList = []string{"*.trusted.test"}
+	common.EmailDomainRegistrationCodeExemptionList = []string{"*.trusted.test"}
 	common.EmailDomainBlacklist = []string{"*.blocked.trusted.test"}
 
 	const verificationCode = "123456"
@@ -346,8 +444,8 @@ func TestDomainEmailRegistrationRejectsBlacklistedDomain(t *testing.T) {
 	cfg.InviteCodeRequired = true
 	cfg.RegistrationCodeRequired = true
 	common.EmailVerificationEnabled = true
-	common.DomainEmailRegistrationEnabled = true
-	common.DomainEmailRegistrationWhitelist = []string{"*.trusted.test"}
+	common.EmailDomainInviteCodeExemptionList = []string{"*.trusted.test"}
+	common.EmailDomainRegistrationCodeExemptionList = []string{"*.trusted.test"}
 	common.EmailDomainBlacklist = []string{"*.blocked.trusted.test"}
 
 	const verificationCode = "123456"
@@ -378,8 +476,8 @@ func TestUnconfiguredDomainEmailStillRequiresInviteCode(t *testing.T) {
 	cfg.InviteCodeRequired = true
 	cfg.RegistrationCodeRequired = true
 	common.EmailVerificationEnabled = true
-	common.DomainEmailRegistrationEnabled = true
-	common.DomainEmailRegistrationWhitelist = []string{"*.trusted.test"}
+	common.EmailDomainInviteCodeExemptionList = []string{"*.trusted.test"}
+	common.EmailDomainRegistrationCodeExemptionList = []string{"*.trusted.test"}
 
 	const verificationCode = "123456"
 	unconfiguredEmail := "user@example.com"
@@ -409,8 +507,8 @@ func TestUnverifiedDomainEmailCannotBypassRegistrationCodes(t *testing.T) {
 	cfg.InviteCodeRequired = true
 	cfg.RegistrationCodeRequired = true
 	common.EmailVerificationEnabled = false
-	common.DomainEmailRegistrationEnabled = true
-	common.DomainEmailRegistrationWhitelist = []string{"*.trusted.test"}
+	common.EmailDomainInviteCodeExemptionList = []string{"*.trusted.test"}
+	common.EmailDomainRegistrationCodeExemptionList = []string{"*.trusted.test"}
 
 	response := registerTestUser(t, gin.H{
 		"username": "unverified-user",

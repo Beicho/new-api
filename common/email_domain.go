@@ -16,11 +16,21 @@ func IsEmailDomainBlacklisted(email string) bool {
 	return IsDomainListed(GetEmailDomain(email), EmailDomainBlacklist)
 }
 
-// IsDomainEmailRegistrationAllowed reports whether a verified password
-// registration may bypass both invitation and registration code requirements.
-func IsDomainEmailRegistrationAllowed(email string) bool {
-	if !DomainEmailRegistrationEnabled || IsEmailDomainBlacklisted(email) {
-		return false
+// Callers must verify email ownership before applying either exemption.
+func IsDomainEmailInviteCodeExempt(email string) bool {
+	return !IsEmailDomainBlacklisted(email) && IsDomainListed(GetEmailDomain(email), EmailDomainInviteCodeExemptionList)
+}
+
+func IsDomainEmailRegistrationCodeExempt(email string) bool {
+	return !IsEmailDomainBlacklisted(email) && IsDomainListed(GetEmailDomain(email), EmailDomainRegistrationCodeExemptionList)
+}
+
+// HasEmailDomainRules ignores empty entries in the comma-separated options.
+func HasEmailDomainRules(domains []string) bool {
+	for _, domain := range domains {
+		if strings.TrimSpace(domain) != "" {
+			return true
+		}
 	}
-	return IsDomainListed(GetEmailDomain(email), DomainEmailRegistrationWhitelist)
+	return false
 }

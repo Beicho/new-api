@@ -31,6 +31,7 @@ import {
   Card,
   Radio,
   Select,
+  Input,
 } from '@douyinfe/semi-ui';
 const { Text } = Typography;
 import {
@@ -108,11 +109,11 @@ const SystemSetting = () => {
     EmailDomainRestrictionEnabled: '',
     EmailAliasRestrictionEnabled: '',
     EmailCaseInsensitiveEnabled: '',
-    DomainEmailRegistrationEnabled: '',
     SMTPSSLEnabled: '',
     SMTPForceAuthLogin: '',
     EmailDomainWhitelist: [],
-    DomainEmailRegistrationWhitelist: [],
+    EmailDomainInviteCodeExemptionList: [],
+    EmailDomainRegistrationCodeExemptionList: [],
     EmailDomainBlacklist: [],
     TelegramOAuthEnabled: '',
     TelegramBotToken: '',
@@ -138,16 +139,17 @@ const SystemSetting = () => {
   const [isLoaded, setIsLoaded] = useState(false);
   const formApiRef = useRef(null);
   const [emailDomainWhitelist, setEmailDomainWhitelist] = useState([]);
-  const [
-    domainEmailRegistrationWhitelist,
-    setDomainEmailRegistrationWhitelist,
-  ] = useState([]);
+  const [inviteCodeExemptionList, setInviteCodeExemptionList] = useState([]);
+  const [registrationCodeExemptionList, setRegistrationCodeExemptionList] =
+    useState([]);
   const [emailDomainBlacklist, setEmailDomainBlacklist] = useState([]);
   const [showPasswordLoginConfirmModal, setShowPasswordLoginConfirmModal] =
     useState(false);
   const [linuxDOOAuthEnabled, setLinuxDOOAuthEnabled] = useState(false);
   const [emailToAdd, setEmailToAdd] = useState('');
-  const [domainEmailToAdd, setDomainEmailToAdd] = useState('');
+  const [inviteCodeDomainToAdd, setInviteCodeDomainToAdd] = useState('');
+  const [registrationCodeDomainToAdd, setRegistrationCodeDomainToAdd] =
+    useState('');
   const [blacklistedEmailToAdd, setBlacklistedEmailToAdd] = useState('');
   const [domainFilterMode, setDomainFilterMode] = useState(true);
   const [ipFilterMode, setIpFilterMode] = useState(true);
@@ -169,8 +171,11 @@ const SystemSetting = () => {
           case 'EmailDomainWhitelist':
             setEmailDomainWhitelist(item.value ? item.value.split(',') : []);
             break;
-          case 'DomainEmailRegistrationWhitelist':
-            setDomainEmailRegistrationWhitelist(
+          case 'EmailDomainInviteCodeExemptionList':
+            setInviteCodeExemptionList(item.value ? item.value.split(',') : []);
+            break;
+          case 'EmailDomainRegistrationCodeExemptionList':
+            setRegistrationCodeExemptionList(
               item.value ? item.value.split(',') : [],
             );
             break;
@@ -219,7 +224,6 @@ const SystemSetting = () => {
           case 'EmailDomainRestrictionEnabled':
           case 'EmailAliasRestrictionEnabled':
           case 'EmailCaseInsensitiveEnabled':
-          case 'DomainEmailRegistrationEnabled':
           case 'SMTPSSLEnabled':
           case 'SMTPForceAuthLogin':
           case 'LinuxDOOAuthEnabled':
@@ -410,20 +414,25 @@ const SystemSetting = () => {
 
   const submitEmailDomainSettings = async () => {
     const normalizedWhitelist = normalizeEmailDomainList(emailDomainWhitelist);
-    const normalizedDomainRegistrationWhitelist = normalizeEmailDomainList(
-      domainEmailRegistrationWhitelist,
+    const normalizedInviteCodeList = normalizeEmailDomainList(
+      inviteCodeExemptionList,
+    );
+    const normalizedRegistrationCodeList = normalizeEmailDomainList(
+      registrationCodeExemptionList,
     );
     const normalizedBlacklist = normalizeEmailDomainList(emailDomainBlacklist);
     if (
       normalizedWhitelist === null ||
-      normalizedDomainRegistrationWhitelist === null ||
+      normalizedInviteCodeList === null ||
+      normalizedRegistrationCodeList === null ||
       normalizedBlacklist === null
     ) {
       return;
     }
 
     setEmailDomainWhitelist(normalizedWhitelist);
-    setDomainEmailRegistrationWhitelist(normalizedDomainRegistrationWhitelist);
+    setInviteCodeExemptionList(normalizedInviteCodeList);
+    setRegistrationCodeExemptionList(normalizedRegistrationCodeList);
     setEmailDomainBlacklist(normalizedBlacklist);
     await updateOptions([
       {
@@ -431,8 +440,12 @@ const SystemSetting = () => {
         value: normalizedWhitelist.join(','),
       },
       {
-        key: 'DomainEmailRegistrationWhitelist',
-        value: normalizedDomainRegistrationWhitelist.join(','),
+        key: 'EmailDomainInviteCodeExemptionList',
+        value: normalizedInviteCodeList.join(','),
+      },
+      {
+        key: 'EmailDomainRegistrationCodeExemptionList',
+        value: normalizedRegistrationCodeList.join(','),
       },
       {
         key: 'EmailDomainBlacklist',
@@ -1320,7 +1333,7 @@ const SystemSetting = () => {
                 <Form.Section text={t('配置邮箱域名注册')}>
                   <Text>
                     {t(
-                      '配置允许注册的邮箱域名、域名邮箱免代码注册范围以及禁止注册的邮箱域名',
+                      '分别配置免邀请码和免注册码的邮箱域名，列表为空时不豁免；邮箱域名黑名单优先。仅验证邮箱后的密码注册生效。',
                     )}
                   </Text>
                   <Row
@@ -1363,20 +1376,6 @@ const SystemSetting = () => {
                         }
                       >
                         {t('邮箱用户名大小写不敏感')}
-                      </Form.Checkbox>
-                    </Col>
-                    <Col xs={24} sm={12} md={6} lg={6} xl={6}>
-                      <Form.Checkbox
-                        field='DomainEmailRegistrationEnabled'
-                        noLabel
-                        onChange={(e) =>
-                          handleCheckboxChange(
-                            'DomainEmailRegistrationEnabled',
-                            e,
-                          )
-                        }
-                      >
-                        {t('域名邮箱免邀请码和注册码注册')}
                       </Form.Checkbox>
                     </Col>
                   </Row>
@@ -1424,20 +1423,20 @@ const SystemSetting = () => {
                   />
 
                   <div style={{ marginTop: 20 }}>
-                    <Text>{t('免代码注册邮箱域名')}</Text>
+                    <Text>{t('免邀请码注册邮箱域名')}</Text>
                   </div>
                   <TagInput
-                    value={domainEmailRegistrationWhitelist}
-                    onChange={setDomainEmailRegistrationWhitelist}
+                    value={inviteCodeExemptionList}
+                    onChange={setInviteCodeExemptionList}
                     placeholder={t('输入域名后回车')}
                     style={{ width: '100%', marginTop: 8 }}
                   />
-                  <Form.Input
+                  <Input
                     placeholder={t(
-                      '输入可免代码注册的邮箱域名，如 example.com 或 *.edu.cn',
+                      '输入可免邀请码注册的邮箱域名，如 example.com 或 *.edu.cn',
                     )}
-                    value={domainEmailToAdd}
-                    onChange={(value) => setDomainEmailToAdd(value)}
+                    value={inviteCodeDomainToAdd}
+                    onChange={setInviteCodeDomainToAdd}
                     style={{ marginTop: 16 }}
                     suffix={
                       <Button
@@ -1445,10 +1444,10 @@ const SystemSetting = () => {
                         type='primary'
                         onClick={() =>
                           handleAddEmailDomain(
-                            domainEmailToAdd,
-                            domainEmailRegistrationWhitelist,
-                            setDomainEmailRegistrationWhitelist,
-                            setDomainEmailToAdd,
+                            inviteCodeDomainToAdd,
+                            inviteCodeExemptionList,
+                            setInviteCodeExemptionList,
+                            setInviteCodeDomainToAdd,
                           )
                         }
                       >
@@ -1457,10 +1456,52 @@ const SystemSetting = () => {
                     }
                     onEnterPress={() =>
                       handleAddEmailDomain(
-                        domainEmailToAdd,
-                        domainEmailRegistrationWhitelist,
-                        setDomainEmailRegistrationWhitelist,
-                        setDomainEmailToAdd,
+                        inviteCodeDomainToAdd,
+                        inviteCodeExemptionList,
+                        setInviteCodeExemptionList,
+                        setInviteCodeDomainToAdd,
+                      )
+                    }
+                  />
+
+                  <div style={{ marginTop: 20 }}>
+                    <Text>{t('免注册码注册邮箱域名')}</Text>
+                  </div>
+                  <TagInput
+                    value={registrationCodeExemptionList}
+                    onChange={setRegistrationCodeExemptionList}
+                    placeholder={t('输入域名后回车')}
+                    style={{ width: '100%', marginTop: 8 }}
+                  />
+                  <Input
+                    placeholder={t(
+                      '输入可免注册码注册的邮箱域名，如 example.com 或 *.edu.cn',
+                    )}
+                    value={registrationCodeDomainToAdd}
+                    onChange={setRegistrationCodeDomainToAdd}
+                    style={{ marginTop: 16 }}
+                    suffix={
+                      <Button
+                        theme='solid'
+                        type='primary'
+                        onClick={() =>
+                          handleAddEmailDomain(
+                            registrationCodeDomainToAdd,
+                            registrationCodeExemptionList,
+                            setRegistrationCodeExemptionList,
+                            setRegistrationCodeDomainToAdd,
+                          )
+                        }
+                      >
+                        {t('添加')}
+                      </Button>
+                    }
+                    onEnterPress={() =>
+                      handleAddEmailDomain(
+                        registrationCodeDomainToAdd,
+                        registrationCodeExemptionList,
+                        setRegistrationCodeExemptionList,
+                        setRegistrationCodeDomainToAdd,
                       )
                     }
                   />

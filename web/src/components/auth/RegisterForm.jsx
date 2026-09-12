@@ -153,9 +153,6 @@ const RegisterForm = () => {
   );
   const registrationCodeRequired = Boolean(status.registration_code_required);
   const inviteCodeRequired = Boolean(status.invite_code_required);
-  const domainEmailRegistrationEnabled = Boolean(
-    status.domain_email_registration_enabled,
-  );
   const registrationOAuthOptions = {
     shouldLogout: true,
     registrationCode: inputs.registration_code,
@@ -165,18 +162,26 @@ const RegisterForm = () => {
   const ensureRequiredRegistrationCodes = (
     allowDomainEmailRegistration = false,
   ) => {
+    // The server checks domain eligibility after verifying email ownership.
+    const allowDomainExemptions =
+      allowDomainEmailRegistration && status.email_verification;
+    const deferInviteCodeCheck =
+      allowDomainExemptions && status.domain_email_no_invite_code;
+    const deferRegistrationCodeCheck =
+      allowDomainExemptions && status.domain_email_no_registration_code;
     if (
-      allowDomainEmailRegistration &&
-      domainEmailRegistrationEnabled &&
-      status.email_verification
+      inviteCodeRequired &&
+      !deferInviteCodeCheck &&
+      !inputs.aff_code.trim()
     ) {
-      return true;
-    }
-    if (inviteCodeRequired && !inputs.aff_code.trim()) {
       showInfo(t('请输入邀请码'));
       return false;
     }
-    if (registrationCodeRequired && !inputs.registration_code.trim()) {
+    if (
+      registrationCodeRequired &&
+      !deferRegistrationCodeCheck &&
+      !inputs.registration_code.trim()
+    ) {
       showInfo(t('请输入注册码'));
       return false;
     }

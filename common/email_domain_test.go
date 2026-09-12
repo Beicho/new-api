@@ -2,36 +2,65 @@ package common
 
 import "testing"
 
-func TestDomainEmailRegistrationPolicy(t *testing.T) {
-	originalEnabled := DomainEmailRegistrationEnabled
-	originalWhitelist := append([]string(nil), DomainEmailRegistrationWhitelist...)
+func TestDomainEmailRegistrationExemptions(t *testing.T) {
+	originalInviteList := EmailDomainInviteCodeExemptionList
+	originalRegistrationList := EmailDomainRegistrationCodeExemptionList
 	originalBlacklist := append([]string(nil), EmailDomainBlacklist...)
 	t.Cleanup(func() {
-		DomainEmailRegistrationEnabled = originalEnabled
-		DomainEmailRegistrationWhitelist = originalWhitelist
+		EmailDomainInviteCodeExemptionList = originalInviteList
+		EmailDomainRegistrationCodeExemptionList = originalRegistrationList
 		EmailDomainBlacklist = originalBlacklist
 	})
 
-	DomainEmailRegistrationEnabled = true
-	DomainEmailRegistrationWhitelist = []string{"*.trusted.test"}
+	EmailDomainInviteCodeExemptionList = []string{"invite.test", "*.trusted.test"}
+	EmailDomainRegistrationCodeExemptionList = []string{"registration.test", "*.trusted.test"}
 	EmailDomainBlacklist = []string{"*.blocked.trusted.test"}
 
-	if !IsDomainEmailRegistrationAllowed("user@mail.trusted.test") {
-		t.Fatal("expected configured domain email to qualify for code-free registration")
+	tests := []struct {
+		email        string
+		invite       bool
+		registration bool
+		blacklisted  bool
+	}{
+		{"user@invite.test", true, false, false},
+		{"user@registration.test", false, true, false},
+		{"user@mail.trusted.test", true, true, false},
+		{"user@TRUSTED.TEST", true, true, false},
+		{"user@mail.blocked.trusted.test", false, false, true},
+		{"user@BLOCKED.TRUSTED.TEST", false, false, true},
+		{"user@nottrusted.test", false, false, false},
+		{"user@trusted.test.evil.test", false, false, false},
+		{"user@mail.invite.test", false, false, false},
+		{"user@example.com", false, false, false},
+		{"invalid", false, false, false},
 	}
-	if IsDomainEmailRegistrationAllowed("user@mail.blocked.trusted.test") {
-		t.Fatal("expected blacklist to override domain email whitelist")
-	}
-	if !IsEmailDomainBlacklisted("user@BLOCKED.TRUSTED.TEST") {
-		t.Fatal("expected wildcard blacklist to match root domain case-insensitively")
-	}
-	if IsDomainEmailRegistrationAllowed("user@example.com") {
-		t.Fatal("expected unconfigured domain email not to qualify")
+	for _, tt := range tests {
+		t.Run(tt.email, func(t *testing.T) {
+			if got := IsDomainEmailInviteCodeExempt(tt.email); got != tt.invite {
+				t.Errorf("invite exemption = %v, want %v", got, tt.invite)
+			}
+			if got := IsDomainEmailRegistrationCodeExempt(tt.email); got != tt.registration {
+				t.Errorf("registration exemption = %v, want %v", got, tt.registration)
+			}
+			if got := IsEmailDomainBlacklisted(tt.email); got != tt.blacklisted {
+				t.Errorf("blacklisted = %v, want %v", got, tt.blacklisted)
+			}
+		})
 	}
 
-	DomainEmailRegistrationEnabled = false
-	if IsDomainEmailRegistrationAllowed("user@mail.trusted.test") {
-		t.Fatal("expected disabled feature not to bypass registration codes")
+	EmailDomainInviteCodeExemptionList = []string{"", " "}
+	EmailDomainRegistrationCodeExemptionList = nil
+	if IsDomainEmailInviteCodeExempt("user@mail.trusted.test") || IsDomainEmailRegistrationCodeExempt("user@mail.trusted.test") {
+		t.Fatal("empty lists must not exempt any domain")
+	}
+}
+
+func TestHasEmailDomainRules(t *testing.T) {
+	if HasEmailDomainRules(nil) || HasEmailDomainRules([]string{"", " "}) {
+		t.Fatal("empty lists must not enable public exemption hints")
+	}
+	if !HasEmailDomainRules([]string{"", "example.com"}) {
+		t.Fatal("nonempty lists must enable public exemption hints")
 	}
 }
 
