@@ -97,11 +97,12 @@ func isOpenRouterManagedFreeOrAlphaModel(modelName string) bool {
 	if modelName == "openrouter/free" || strings.HasSuffix(modelName, ":free") {
 		return true
 	}
-	if !strings.HasPrefix(modelName, "openrouter/") || !strings.HasSuffix(modelName, "-alpha") {
+	if !strings.HasSuffix(modelName, "-alpha") {
 		return false
 	}
-	alphaName := strings.TrimSuffix(strings.TrimPrefix(modelName, "openrouter/"), "-alpha")
-	return alphaName != "" && !strings.Contains(alphaName, "/")
+	// Alpha test models can belong to any provider, including nested namespaces.
+	alphaName := modelName[strings.LastIndex(modelName, "/")+1:]
+	return strings.TrimSpace(strings.TrimSuffix(alphaName, "-alpha")) != ""
 }
 
 func filterOpenRouterManagedFreeAndAlphaModels(models []string) []string {
@@ -524,7 +525,7 @@ func fetchOpenRouterManagedFreeAndAlphaModelIDs(
 	}
 	managedModels := filterOpenRouterManagedFreeAndAlphaModels(models)
 	if len(managedModels) == 0 {
-		return nil, fmt.Errorf("OpenRouter 用户模型列表未返回任何免费或匿名 Alpha 模型")
+		return nil, fmt.Errorf("OpenRouter 用户模型列表未返回任何免费或 Alpha 测试模型")
 	}
 	return managedModels, nil
 }

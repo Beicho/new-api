@@ -32,11 +32,24 @@ func TestIsOpenRouterManagedFreeOrAlphaModel(t *testing.T) {
 	}{
 		{name: "free suffix", modelName: "google/gemma:free", expected: true},
 		{name: "free router", modelName: "openrouter/free", expected: true},
-		{name: "anonymous alpha", modelName: "openrouter/owl-alpha", expected: true},
+		{name: "openrouter alpha", modelName: "openrouter/owl-alpha", expected: true},
 		{name: "case and whitespace", modelName: " OpenRouter/Elephant-Alpha ", expected: true},
-		{name: "other provider alpha", modelName: "vendor/owl-alpha", expected: false},
-		{name: "nested openrouter alpha", modelName: "openrouter/vendor/owl-alpha", expected: false},
+		{name: "other provider alpha", modelName: "vendor/owl-alpha", expected: true},
+		{name: "other provider case and whitespace", modelName: " Vendor/OWL-ALPHA ", expected: true},
+		{name: "nested openrouter alpha", modelName: "openrouter/vendor/owl-alpha", expected: true},
+		{name: "nested provider alpha", modelName: "vendor/family/owl-alpha", expected: true},
+		{name: "alpha without provider", modelName: "owl-alpha", expected: true},
+		{name: "alpha without hyphen", modelName: "vendor/modelalpha", expected: false},
+		{name: "alpha with underscore", modelName: "vendor/model_alpha", expected: false},
+		{name: "alpha followed by version", modelName: "vendor/model-alpha-v2", expected: false},
+		{name: "alpha prefix", modelName: "vendor/alpha-model", expected: false},
+		{name: "alpha in provider only", modelName: "vendor-alpha/model", expected: false},
 		{name: "empty alpha name", modelName: "openrouter/-alpha", expected: false},
+		{name: "empty provider alpha name", modelName: "vendor/family/-alpha", expected: false},
+		{name: "alpha suffix only", modelName: "-alpha", expected: false},
+		{name: "blank alpha name", modelName: "vendor/ -alpha", expected: false},
+		{name: "empty model", modelName: "", expected: false},
+		{name: "blank model", modelName: " \t ", expected: false},
 		{name: "paid model", modelName: "openrouter/auto", expected: false},
 		{name: "zero price without marker", modelName: "google/lyria-preview", expected: false},
 	}
@@ -58,6 +71,7 @@ func TestSimplifyOpenRouterFreeModelName(t *testing.T) {
 		{modelName: "openai/gpt-oss-20b:free", expected: "gpt-oss-20b", canSimplify: true},
 		{modelName: "openrouter/free", canSimplify: false},
 		{modelName: "openrouter/owl-alpha", canSimplify: false},
+		{modelName: "vendor/owl-alpha", canSimplify: false},
 		{modelName: "model-without-provider:free", canSimplify: false},
 	}
 
@@ -84,6 +98,7 @@ func TestBuildOpenRouterManagedModelPlanSimplifiesOnlyFreeModels(t *testing.T) {
 			"openai/gpt-oss-20b:free",
 			"openrouter/free",
 			"openrouter/owl-alpha",
+			"vendor/owl-alpha",
 		},
 		true,
 		nil,
@@ -94,6 +109,7 @@ func TestBuildOpenRouterManagedModelPlanSimplifiesOnlyFreeModels(t *testing.T) {
 		"gpt-oss-20b",
 		"openrouter/free",
 		"openrouter/owl-alpha",
+		"vendor/owl-alpha",
 	}, plan.DesiredModels)
 	require.Equal(t, map[string]string{
 		"nemotron-3-super": "nvidia/nemotron-3-super:free",
@@ -309,6 +325,19 @@ func TestFetchOpenRouterManagedFreeAndAlphaModelIDs(t *testing.T) {
 		require.Equal(t, []string{"vendor/model:free", "openrouter/free", "openrouter/owl-alpha"}, models)
 	})
 
+	t.Run("accepts only other provider alpha models and preserves IDs", func(t *testing.T) {
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"data":[{"id":" Vendor/OWL-ALPHA "},{"id":"vendor/family/owl-alpha"},{"id":"owl-alpha"},{"id":"Vendor/OWL-ALPHA"},{"id":"vendor/modelalpha"},{"id":"vendor/model_alpha"},{"id":"vendor/model-alpha-v2"}]}`))
+		}))
+		defer upstream.Close()
+
+		channel := &model.Channel{Type: constant.ChannelTypeOpenRouter}
+		models, err := fetchOpenRouterManagedFreeAndAlphaModelIDs(channel, upstream.URL, "test-key", "")
+
+		require.NoError(t, err)
+		require.Equal(t, []string{"Vendor/OWL-ALPHA", "vendor/family/owl-alpha", "owl-alpha"}, models)
+	})
+
 	t.Run("uses custom model list URL", func(t *testing.T) {
 		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			require.Equal(t, "/custom/models", r.URL.Path)
@@ -371,21 +400,26 @@ func TestFetchOpenRouterManagedFreeAndAlphaModelIDs(t *testing.T) {
 func TestCheckAndPersistOpenRouterManagedModelUpdates(t *testing.T) {
 	db := openChannelRetryControllerTestDB(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"data":[{"id":"paid/upstream"},{"id":"vendor/new:free"},{"id":"openrouter/free"},{"id":"openrouter/elephant-alpha"}]}`))
+		_, _ = w.Write([]byte(`{"data":[{"id":"paid/upstream"},{"id":"vendor/new:free"},{"id":"openrouter/free"},{"id":"vendor/elephant-alpha"},{"id":"vendor/ignored-alpha"}]}`))
 	}))
 	defer upstream.Close()
 
 	baseURL := upstream.URL
+	manualMapping := `{"vendor/manual-alpha":"paid/upstream"}`
 	channel := model.Channel{
-		Type:    constant.ChannelTypeOpenRouter,
-		Key:     "test-key",
-		Status:  common.ChannelStatusEnabled,
-		Name:    "openrouter-managed-models",
-		BaseURL: &baseURL,
-		Models:  "paid/local,vendor/old:free,openrouter/owl-alpha",
-		Group:   "default",
+		Type:         constant.ChannelTypeOpenRouter,
+		Key:          "test-key",
+		Status:       common.ChannelStatusEnabled,
+		Name:         "openrouter-managed-models",
+		BaseURL:      &baseURL,
+		Models:       "paid/local,vendor/old:free,vendor/owl-alpha,vendor/manual-alpha",
+		ModelMapping: &manualMapping,
+		Group:        "default",
 	}
-	settings := dto.ChannelOtherSettings{OpenRouterFreeAlphaSyncEnabled: true}
+	settings := dto.ChannelOtherSettings{
+		OpenRouterFreeAlphaSyncEnabled:   true,
+		UpstreamModelUpdateIgnoredModels: []string{"vendor/ignored-alpha"},
+	}
 	channel.SetOtherSettings(settings)
 	require.NoError(t, db.Create(&channel).Error)
 	require.NoError(t, channel.UpdateAbilities(nil))
@@ -399,18 +433,19 @@ func TestCheckAndPersistOpenRouterManagedModelUpdates(t *testing.T) {
 
 	require.NoError(t, err)
 	require.True(t, modelsChanged)
-	require.Equal(t, []string{"vendor/new:free", "openrouter/free", "openrouter/elephant-alpha"}, autoApplyResult.AddedModels)
-	require.Equal(t, []string{"vendor/old:free", "openrouter/owl-alpha"}, autoApplyResult.RemovedModels)
-	require.Equal(t, "paid/local,vendor/new:free,openrouter/free,openrouter/elephant-alpha", channel.Models)
+	require.Equal(t, []string{"vendor/new:free", "openrouter/free", "vendor/elephant-alpha"}, autoApplyResult.AddedModels)
+	require.Equal(t, []string{"vendor/old:free", "vendor/owl-alpha"}, autoApplyResult.RemovedModels)
+	require.Equal(t, "paid/local,vendor/manual-alpha,vendor/new:free,openrouter/free,vendor/elephant-alpha", channel.Models)
 	require.Empty(t, settings.UpstreamModelUpdateLastDetectedModels)
 	require.Empty(t, settings.UpstreamModelUpdateLastRemovedModels)
 
 	var reloaded model.Channel
 	require.NoError(t, db.First(&reloaded, channel.Id).Error)
 	require.Equal(t, channel.Models, reloaded.Models)
+	require.Equal(t, map[string]string{"vendor/manual-alpha": "paid/upstream"}, normalizeChannelModelMapping(&reloaded))
 	var abilityModels []string
 	require.NoError(t, db.Model(&model.Ability{}).Where("channel_id = ?", channel.Id).Order("model asc").Pluck("model", &abilityModels).Error)
-	require.Equal(t, []string{"openrouter/elephant-alpha", "openrouter/free", "paid/local", "vendor/new:free"}, abilityModels)
+	require.Equal(t, []string{"openrouter/free", "paid/local", "vendor/elephant-alpha", "vendor/manual-alpha", "vendor/new:free"}, abilityModels)
 }
 
 func TestCheckAndPersistOpenRouterManagedModelUpdatesPreservesModelsOnEmptyResult(t *testing.T) {
@@ -566,7 +601,7 @@ func TestCheckAndPersistOpenRouterManagedModelUpdatesRestoresFullNamesWhenSimpli
 func TestApplyChannelUpstreamModelUpdatesAppliesPendingSimplifiedMapping(t *testing.T) {
 	db := openChannelRetryControllerTestDB(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"data":[{"id":"nvidia/nemotron-3-super:free"},{"id":"openrouter/owl-alpha"}]}`))
+		_, _ = w.Write([]byte(`{"data":[{"id":"nvidia/nemotron-3-super:free"},{"id":"vendor/owl-alpha"}]}`))
 	}))
 	defer upstream.Close()
 
@@ -577,7 +612,7 @@ func TestApplyChannelUpstreamModelUpdatesAppliesPendingSimplifiedMapping(t *test
 		Status:  common.ChannelStatusEnabled,
 		Name:    "openrouter-manual-simplified-models",
 		BaseURL: &baseURL,
-		Models:  "paid/local",
+		Models:  "paid/local,vendor/old-alpha",
 		Group:   "default",
 	}
 	settings := dto.ChannelOtherSettings{
@@ -586,28 +621,42 @@ func TestApplyChannelUpstreamModelUpdatesAppliesPendingSimplifiedMapping(t *test
 	}
 	channel.SetOtherSettings(settings)
 	require.NoError(t, db.Create(&channel).Error)
+	require.NoError(t, channel.UpdateAbilities(nil))
 
 	_, _, err := checkAndPersistChannelUpstreamModelUpdates(&channel, &settings, true, false)
 	require.NoError(t, err)
-	require.Equal(t, []string{"nemotron-3-super", "openrouter/owl-alpha"}, settings.UpstreamModelUpdateLastDetectedModels)
+	require.Equal(t, []string{"nemotron-3-super", "vendor/owl-alpha"}, settings.UpstreamModelUpdateLastDetectedModels)
+	require.Equal(t, []string{"vendor/old-alpha"}, settings.UpstreamModelUpdateLastRemovedModels)
 	require.Equal(t, map[string]string{"nemotron-3-super": "nvidia/nemotron-3-super:free"}, settings.OpenRouterFreeModelPendingMappings)
+
+	// Bulk apply must select the same models, including Alpha models from other providers.
+	pendingAddModels, pendingRemoveModels := collectPendingApplyUpstreamModelChanges(&channel, channel.GetOtherSettings())
+	require.Equal(t, settings.UpstreamModelUpdateLastDetectedModels, pendingAddModels)
+	require.Equal(t, settings.UpstreamModelUpdateLastRemovedModels, pendingRemoveModels)
 
 	addedModels, removedModels, remainingModels, remainingRemoveModels, modelsChanged, err := applyChannelUpstreamModelUpdates(
 		&channel,
-		[]string{"nemotron-3-super", "openrouter/owl-alpha"},
+		pendingAddModels,
 		nil,
-		nil,
+		pendingRemoveModels,
 	)
 
 	require.NoError(t, err)
 	require.True(t, modelsChanged)
-	require.Equal(t, []string{"nemotron-3-super", "openrouter/owl-alpha"}, addedModels)
-	require.Empty(t, removedModels)
+	require.Equal(t, []string{"nemotron-3-super", "vendor/owl-alpha"}, addedModels)
+	require.Equal(t, []string{"vendor/old-alpha"}, removedModels)
 	require.Empty(t, remainingModels)
 	require.Empty(t, remainingRemoveModels)
-	require.Equal(t, "paid/local,nemotron-3-super,openrouter/owl-alpha", channel.Models)
+	require.Equal(t, "paid/local,nemotron-3-super,vendor/owl-alpha", channel.Models)
 	require.Equal(t, map[string]string{"nemotron-3-super": "nvidia/nemotron-3-super:free"}, normalizeChannelModelMapping(&channel))
 	require.Equal(t, map[string]string{"nemotron-3-super": "nvidia/nemotron-3-super:free"}, channel.GetOtherSettings().OpenRouterFreeModelGeneratedMappings)
+
+	var reloaded model.Channel
+	require.NoError(t, db.First(&reloaded, channel.Id).Error)
+	require.Equal(t, channel.Models, reloaded.Models)
+	var abilityModels []string
+	require.NoError(t, db.Model(&model.Ability{}).Where("channel_id = ?", channel.Id).Order("model asc").Pluck("model", &abilityModels).Error)
+	require.Equal(t, []string{"nemotron-3-super", "paid/local", "vendor/owl-alpha"}, abilityModels)
 }
 
 func TestBuildUpstreamModelUpdateTaskNotificationContent_OmitOverflowDetails(t *testing.T) {

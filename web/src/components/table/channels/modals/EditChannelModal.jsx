@@ -2469,7 +2469,7 @@ const EditChannelModal = (props) => {
                   {inputs.type === 20 && (
                     <Form.Switch
                       field='openrouter_auto_sync_free_and_alpha_models_enabled'
-                      label={t('自动维护 OpenRouter 免费及匿名 Alpha 模型')}
+                      label={t('自动维护 OpenRouter 免费及 Alpha 测试模型')}
                       checkedText={t('开')}
                       uncheckedText={t('关')}
                       onChange={(value) =>
@@ -2479,7 +2479,7 @@ const EditChannelModal = (props) => {
                         )
                       }
                       extraText={t(
-                        '开启后自动增删以 :free 结尾、openrouter/free 及 openrouter/*-alpha 模型，并保留其他模型',
+                        '开启后自动增删以 :free 结尾的模型、openrouter/free 及以 -alpha 结尾的测试模型（不限提供商前缀），并保留其他模型',
                       )}
                     />
                   )}
@@ -2499,7 +2499,7 @@ const EditChannelModal = (props) => {
                         )
                       }
                       extraText={t(
-                        '将 provider/model:free 简化为 model 并自动添加模型重定向；openrouter/free 和匿名 Alpha 模型保持原名，名称冲突时保留完整模型名',
+                        '将 provider/model:free 简化为 model 并自动添加模型重定向；openrouter/free 和 Alpha 测试模型保持原名，名称冲突时保留完整模型名',
                       )}
                     />
                   )}
@@ -2521,7 +2521,7 @@ const EditChannelModal = (props) => {
                     extraText={t(
                       inputs.type === 20 &&
                         inputs.openrouter_auto_sync_free_and_alpha_models_enabled
-                        ? 'OpenRouter 免费及匿名 Alpha 模型同步已开启，全部模型巡检设置暂时停用'
+                        ? 'OpenRouter 免费及 Alpha 测试模型同步已开启，全部模型巡检设置暂时停用'
                         : '开启后由后端定时任务检测该渠道上游模型变化',
                     )}
                   />
