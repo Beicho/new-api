@@ -86,6 +86,11 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 	defer func() {
 		// 通知所有 goroutine 停止
 		common.SafeSendBool(stopChan, true)
+		// Unblock scanner.Scan when a semantic terminal event or client cancellation
+		// ends a stream whose upstream connection is still open.
+		if resp.Body != nil {
+			_ = resp.Body.Close()
+		}
 
 		ticker.Stop()
 		if pingTicker != nil {

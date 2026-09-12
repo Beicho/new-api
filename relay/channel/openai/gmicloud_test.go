@@ -114,7 +114,7 @@ func TestGMICloudKeepsStreamingButDropsUndocumentedStreamOptions(t *testing.T) {
 	request := &dto.GeneralOpenAIRequest{
 		Model:         "MiniMaxAI/MiniMax-M2.7",
 		Stream:        &isStream,
-		StreamOptions: &dto.StreamOptions{IncludeUsage: true},
+		StreamOptions: &dto.StreamOptions{IncludeUsage: projectcommon.GetPointer(true)},
 	}
 	info := &relaycommon.RelayInfo{
 		ChannelMeta: &relaycommon.ChannelMeta{

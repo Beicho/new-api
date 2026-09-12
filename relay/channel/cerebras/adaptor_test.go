@@ -3,6 +3,7 @@ package cerebras
 import (
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -59,7 +60,7 @@ func TestConvertOpenAIRequestPreservesStreamOptions(t *testing.T) {
 	request := &dto.GeneralOpenAIRequest{
 		Model:         "gpt-oss-120b",
 		Stream:        lo.ToPtr(true),
-		StreamOptions: &dto.StreamOptions{IncludeUsage: true},
+		StreamOptions: &dto.StreamOptions{IncludeUsage: common.GetPointer(true)},
 	}
 	info := &relaycommon.RelayInfo{
 		ChannelMeta: &relaycommon.ChannelMeta{
@@ -75,5 +76,5 @@ func TestConvertOpenAIRequestPreservesStreamOptions(t *testing.T) {
 	convertedRequest, ok := converted.(*dto.GeneralOpenAIRequest)
 	require.True(t, ok)
 	require.NotNil(t, convertedRequest.StreamOptions)
-	require.True(t, convertedRequest.StreamOptions.IncludeUsage)
+	require.True(t, convertedRequest.StreamOptions.GetIncludeUsage())
 }

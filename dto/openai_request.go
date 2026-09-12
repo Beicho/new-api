@@ -60,8 +60,10 @@ type GeneralOpenAIRequest struct {
 	// ServiceTier specifies upstream service level and may affect billing.
 	// This field is filtered by default and can be enabled via channel setting allow_service_tier.
 	ServiceTier json.RawMessage `json:"service_tier,omitempty"`
-	LogProbs    *bool           `json:"logprobs,omitempty"`
+	LogProbs    *BoolOrInt      `json:"logprobs,omitempty"`
 	TopLogProbs *int            `json:"top_logprobs,omitempty"`
+	Echo        *bool           `json:"echo,omitempty"`
+	UserID      *string         `json:"user_id,omitempty"`
 	Dimensions  *int            `json:"dimensions,omitempty"`
 	Modalities  json.RawMessage `json:"modalities,omitempty"`
 	Audio       json.RawMessage `json:"audio,omitempty"`
@@ -242,10 +244,14 @@ type FunctionRequest struct {
 }
 
 type StreamOptions struct {
-	IncludeUsage bool `json:"include_usage,omitempty"`
+	IncludeUsage *bool `json:"include_usage,omitempty"`
 	// IncludeObfuscation is only for /v1/responses stream payload.
 	// This field is filtered by default and can be enabled via channel setting allow_include_obfuscation.
-	IncludeObfuscation bool `json:"include_obfuscation,omitempty"`
+	IncludeObfuscation *bool `json:"include_obfuscation,omitempty"`
+}
+
+func (s *StreamOptions) GetIncludeUsage() bool {
+	return s != nil && s.IncludeUsage != nil && *s.IncludeUsage
 }
 
 func (r *GeneralOpenAIRequest) GetMaxTokens() uint {
@@ -280,12 +286,19 @@ type Message struct {
 	Content          any             `json:"content"`
 	Name             *string         `json:"name,omitempty"`
 	Prefix           *bool           `json:"prefix,omitempty"`
-	ReasoningContent string          `json:"reasoning_content,omitempty"`
+	ReasoningContent *string         `json:"reasoning_content,omitempty"`
 	Reasoning        string          `json:"reasoning,omitempty"`
 	ToolCalls        json.RawMessage `json:"tool_calls,omitempty"`
 	ToolCallId       string          `json:"tool_call_id,omitempty"`
 	parsedContent    []MediaContent
 	//parsedStringContent *string
+}
+
+func (m *Message) GetReasoningContent() string {
+	if m.ReasoningContent == nil {
+		return ""
+	}
+	return *m.ReasoningContent
 }
 
 type MediaContent struct {

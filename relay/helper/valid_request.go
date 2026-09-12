@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
@@ -135,7 +136,8 @@ func GetAndValidateResponsesRequest(c *gin.Context) (*dto.OpenAIResponsesRequest
 	if request.Model == "" {
 		return nil, errors.New("model is required")
 	}
-	if request.Input == nil {
+	if request.Input == nil && !(common.GetContextKeyInt(c, constant.ContextKeyChannelType) == constant.ChannelTypeDeepSeek &&
+		len(request.Instructions) > 0 && string(request.Instructions) != "null") {
 		return nil, errors.New("input is required")
 	}
 	return request, nil
@@ -265,6 +267,15 @@ func GetAndValidateTextRequest(c *gin.Context, relayMode int) (*dto.GeneralOpenA
 	err := common.UnmarshalBodyReusable(c, textRequest)
 	if err != nil {
 		return nil, err
+	}
+	if textRequest.LogProbs != nil {
+		if relayMode == relayconstant.RelayModeCompletions {
+			if textRequest.LogProbs.Int == nil {
+				return nil, errors.New("logprobs must be an integer for completions")
+			}
+		} else if textRequest.LogProbs.Bool == nil {
+			return nil, errors.New("logprobs must be a boolean for chat completions")
+		}
 	}
 
 	if relayMode == relayconstant.RelayModeModerations && textRequest.Model == "" {

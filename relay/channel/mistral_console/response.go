@@ -95,7 +95,7 @@ func handleBoraResponse(c *gin.Context, resp *http.Response, info *relaycommon.R
 	message := dto.Message{
 		Role:             "assistant",
 		Content:          state.text.String(),
-		ReasoningContent: state.reasoning.String(),
+		ReasoningContent: common.GetPointer(state.reasoning.String()),
 	}
 	if len(state.toolCalls) > 0 {
 		message.SetToolCalls(state.nonStreamToolCalls())

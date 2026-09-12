@@ -54,6 +54,12 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 			types.ErrOptionWithSkipRetry(),
 		)
 	}
+	// Revalidate after channel selection on every attempt: an instructions-only
+	// DeepSeek request must not silently bypass another provider's input requirement
+	// when retried on a different channel.
+	if info.RelayMode == relayconstant.RelayModeResponses && responsesReq.Input == nil && info.ApiType != appconstant.APITypeDeepSeek {
+		return types.NewErrorWithStatusCode(fmt.Errorf("input is required"), types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+	}
 
 	request, err := common.DeepCopy(responsesReq)
 	if err != nil {

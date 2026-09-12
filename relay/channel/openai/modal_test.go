@@ -61,7 +61,7 @@ func TestModalChatCompletionRequest(t *testing.T) {
 	request := &dto.GeneralOpenAIRequest{
 		Model:           modelName,
 		Stream:          &stream,
-		StreamOptions:   &dto.StreamOptions{IncludeUsage: true},
+		StreamOptions:   &dto.StreamOptions{IncludeUsage: projectcommon.GetPointer(true)},
 		MaxTokens:       &maxTokens,
 		ReasoningEffort: "none",
 		Temperature:     &temperature,
@@ -130,7 +130,7 @@ func TestModalAdvancedRequestPreservesOpenAICompatibleFields(t *testing.T) {
 		MaxTokens:     &maxTokens,
 		TopP:          &topP,
 		Stream:        &stream,
-		StreamOptions: &dto.StreamOptions{IncludeUsage: true},
+		StreamOptions: &dto.StreamOptions{IncludeUsage: projectcommon.GetPointer(true)},
 		Reasoning:     reasoning,
 		ResponseFormat: &dto.ResponseFormat{
 			Type:       "json_schema",

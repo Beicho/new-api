@@ -131,7 +131,7 @@ func TestVercelKeepsStreamingButDropsUnverifiedStreamOptions(t *testing.T) {
 	request := &dto.GeneralOpenAIRequest{
 		Model:         "minimax/minimax-m2.7-free",
 		Stream:        &isStream,
-		StreamOptions: &dto.StreamOptions{IncludeUsage: true},
+		StreamOptions: &dto.StreamOptions{IncludeUsage: projectcommon.GetPointer(true)},
 	}
 	info := &relaycommon.RelayInfo{
 		ChannelMeta: &relaycommon.ChannelMeta{

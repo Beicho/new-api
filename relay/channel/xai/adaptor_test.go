@@ -240,7 +240,7 @@ func TestConvertOpenAIResponsesRequestCodexCompatibilityDeletesUnsupportedFields
 		Stream:               &streamFalse,
 		PromptCacheKey:       mustRawMessage(t, "cache-key"),
 		PromptCacheRetention: mustRawMessage(t, "24h"),
-		StreamOptions:        &dto.StreamOptions{IncludeObfuscation: true},
+		StreamOptions:        &dto.StreamOptions{IncludeObfuscation: common.GetPointer(true)},
 		Prompt:               mustRawMessage(t, map[string]any{"id": "pmpt_123"}),
 		EnableThinking:       mustRawMessage(t, true),
 		Preset:               mustRawMessage(t, "sonar"),
