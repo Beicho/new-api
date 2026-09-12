@@ -124,6 +124,7 @@ func chatCompletionsViaResponses(c *gin.Context, info *relaycommon.RelayInfo, ad
 		return nil, types.NewErrorWithStatusCode(err, types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 	}
 	info.AppendRequestConversion(types.RelayFormatOpenAIResponses)
+	info.InitResponsesUsageInfo(responsesReq)
 
 	savedRelayMode := info.RelayMode
 	savedRequestURLPath := info.RequestURLPath

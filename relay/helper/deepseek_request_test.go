@@ -21,14 +21,15 @@ func requestContext(body string, channelType int) *gin.Context {
 	return c
 }
 
-func TestResponsesInstructionsOnlyIsDeepSeekSpecific(t *testing.T) {
+func TestResponsesInputRequirementsByChannel(t *testing.T) {
 	for _, tc := range []struct {
 		channel int
 		body    string
 		valid   bool
 	}{
 		{constant.ChannelTypeDeepSeek, `{"model":"deepseek-flash","instructions":"Answer hello"}`, true},
-		{constant.ChannelTypeOpenAI, `{"model":"gpt-4.1","instructions":"Answer hello"}`, false},
+		{constant.ChannelTypeOpenAI, `{"model":"gpt-4.1","instructions":"Answer hello"}`, true},
+		{constant.ChannelTypeAzure, `{"model":"gpt-4.1","instructions":"Answer hello"}`, false},
 		{constant.ChannelTypeDeepSeek, `{"model":"deepseek-flash"}`, false},
 		{constant.ChannelTypeDeepSeek, `{"model":"deepseek-flash","instructions":null}`, false},
 		{constant.ChannelTypeDeepSeek, `{"model":"deepseek-flash","input":"Hello"}`, true},

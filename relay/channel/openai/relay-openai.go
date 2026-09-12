@@ -417,6 +417,9 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 	}
 
 	info.IsStream = true
+	if info.ChannelType == constant.ChannelTypeOpenAI {
+		return nil, relayRealtimeGA(c, info, func(usage *dto.RealtimeUsage) error { return service.PreWssConsumeQuota(c, info, usage) })
+	}
 	clientConn := info.ClientWs
 	targetConn := info.TargetWs
 
@@ -518,7 +521,10 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 				}
 
 				if realtimeEvent.Type == dto.RealtimeEventTypeResponseDone {
-					realtimeUsage := realtimeEvent.Response.Usage
+					var realtimeUsage *dto.RealtimeUsage
+					if realtimeEvent.Response != nil {
+						realtimeUsage = realtimeEvent.Response.Usage
+					}
 					if realtimeUsage != nil {
 						usage.TotalTokens += realtimeUsage.TotalTokens
 						usage.InputTokens += realtimeUsage.InputTokens
@@ -566,8 +572,9 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 					realtimeSession := realtimeEvent.Session
 					if realtimeSession != nil {
 						// update audio format
-						info.InputAudioFormat = common.GetStringIfEmpty(realtimeSession.InputAudioFormat, info.InputAudioFormat)
-						info.OutputAudioFormat = common.GetStringIfEmpty(realtimeSession.OutputAudioFormat, info.OutputAudioFormat)
+						inputFormat, outputFormat := realtimeSession.AudioFormats()
+						info.InputAudioFormat = common.GetStringIfEmpty(inputFormat, info.InputAudioFormat)
+						info.OutputAudioFormat = common.GetStringIfEmpty(outputFormat, info.OutputAudioFormat)
 					}
 				} else {
 					textToken, audioToken, err := service.CountTokenRealtime(info, *realtimeEvent, info.UpstreamModelName)

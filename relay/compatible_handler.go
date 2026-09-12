@@ -58,9 +58,10 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 	} else {
 		// 如果支持StreamOptions，且请求中没有设置StreamOptions，根据配置文件设置StreamOptions
 		if constant.ForceStreamOption {
-			request.StreamOptions = &dto.StreamOptions{
-				IncludeUsage: common.GetPointer(true),
+			if request.StreamOptions == nil {
+				request.StreamOptions = &dto.StreamOptions{}
 			}
+			request.StreamOptions.IncludeUsage = common.GetPointer(true)
 		}
 	}
 

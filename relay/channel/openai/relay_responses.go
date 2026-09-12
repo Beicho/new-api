@@ -55,17 +55,9 @@ func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		}
 		usage = *service.ResponseText2Usage(c, text.String(), info.UpstreamModelName, info.GetEstimatePromptTokens())
 	}
-	if info == nil || info.ResponsesUsageInfo == nil || info.ResponsesUsageInfo.BuiltInTools == nil {
-		return &usage, nil
-	}
-	// 解析 Tools 用量
-	for _, tool := range responsesResponse.Tools {
-		buildToolinfo, ok := info.ResponsesUsageInfo.BuiltInTools[common.Interface2String(tool["type"])]
-		if !ok || buildToolinfo == nil {
-			logger.LogError(c, fmt.Sprintf("BuiltInTools not found for tool type: %v", tool["type"]))
-			continue
-		}
-		buildToolinfo.CallCount++
+	record := newResponsesToolRecorder(info)
+	for _, item := range responsesResponse.Output {
+		record(item)
 	}
 	return &usage, nil
 }
@@ -81,6 +73,7 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	var usage = &dto.Usage{}
 	var responseTextBuilder strings.Builder
 	var hasUsage, terminal bool
+	record := newResponsesToolRecorder(info)
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 
@@ -96,6 +89,9 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 		case "response.completed", "response.incomplete", "response.failed":
 			terminal = true
 			if streamResponse.Response != nil {
+				for _, item := range streamResponse.Response.Output {
+					record(item)
+				}
 				if streamResponse.Response.Usage != nil {
 					*usage = normalizeResponsesUsage(streamResponse.Response.Usage)
 					hasUsage = true
@@ -124,16 +120,8 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 			// 处理输出文本
 			responseTextBuilder.WriteString(streamResponse.Delta)
 		case dto.ResponsesOutputTypeItemDone:
-			// 函数调用处理
 			if streamResponse.Item != nil {
-				switch streamResponse.Item.Type {
-				case dto.BuildInCallWebSearchCall:
-					if info != nil && info.ResponsesUsageInfo != nil && info.ResponsesUsageInfo.BuiltInTools != nil {
-						if webSearchTool, exists := info.ResponsesUsageInfo.BuiltInTools[dto.BuildInToolWebSearchPreview]; exists && webSearchTool != nil {
-							webSearchTool.CallCount++
-						}
-					}
-				}
+				record(*streamResponse.Item)
 			}
 		}
 	})
@@ -165,4 +153,45 @@ func normalizeResponsesUsage(upstream *dto.Usage) dto.Usage {
 		usage.CompletionTokenDetails = *upstream.OutputTokensDetails
 	}
 	return usage
+}
+
+// Count executions, not declarations. The item id deduplicates output_item.done
+// against the final response output snapshot.
+func newResponsesToolRecorder(info *relaycommon.RelayInfo) func(dto.ResponsesOutput) {
+	seen := make(map[string]bool)
+	return func(item dto.ResponsesOutput) {
+		if info == nil {
+			return
+		}
+		if item.Status != "" && item.Status != "completed" {
+			return
+		}
+		toolType := ""
+		switch item.Type {
+		case "web_search_call":
+			toolType = dto.BuildInToolWebSearchPreview
+		case "file_search_call":
+			toolType = dto.BuildInToolFileSearch
+		default:
+			return
+		}
+		if item.ID != "" {
+			if seen[item.ID] {
+				return
+			}
+			seen[item.ID] = true
+		}
+		if info.ResponsesUsageInfo == nil {
+			info.ResponsesUsageInfo = &relaycommon.ResponsesUsageInfo{}
+		}
+		if info.ResponsesUsageInfo.BuiltInTools == nil {
+			info.ResponsesUsageInfo.BuiltInTools = make(map[string]*relaycommon.BuildInToolInfo)
+		}
+		tool := info.ResponsesUsageInfo.BuiltInTools[toolType]
+		if tool == nil {
+			tool = &relaycommon.BuildInToolInfo{ToolName: toolType, SearchContextSize: "medium"}
+			info.ResponsesUsageInfo.BuiltInTools[toolType] = tool
+		}
+		tool.CallCount++
+	}
 }

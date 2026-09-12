@@ -77,6 +77,8 @@ type GeneralOpenAIRequest struct {
 	// Used by OpenAI to cache responses for similar requests to optimize your cache hit rates. Replaces the user field
 	PromptCacheKey       string          `json:"prompt_cache_key,omitempty"`
 	PromptCacheRetention json.RawMessage `json:"prompt_cache_retention,omitempty"`
+	PromptCacheOptions   json.RawMessage `json:"prompt_cache_options,omitempty"`
+	Moderation           json.RawMessage `json:"moderation,omitempty"`
 	LogitBias            json.RawMessage `json:"logit_bias,omitempty"`
 	Metadata             json.RawMessage `json:"metadata,omitempty"`
 	Prediction           json.RawMessage `json:"prediction,omitempty"`
@@ -243,9 +245,23 @@ type FunctionRequest struct {
 	Strict      *bool  `json:"strict,omitempty"`
 }
 
+func (t ToolCallRequest) MarshalJSON() ([]byte, error) {
+	type alias ToolCallRequest
+	body, err := common.Marshal(alias(t))
+	if err != nil || t.Type != CustomType {
+		return body, err
+	}
+	var fields map[string]json.RawMessage
+	if err := common.Unmarshal(body, &fields); err != nil {
+		return nil, err
+	}
+	delete(fields, "function")
+	return common.Marshal(fields)
+}
+
 type StreamOptions struct {
 	IncludeUsage *bool `json:"include_usage,omitempty"`
-	// IncludeObfuscation is only for /v1/responses stream payload.
+	// IncludeObfuscation is supported by Chat Completions and Responses.
 	// This field is filtered by default and can be enabled via channel setting allow_include_obfuscation.
 	IncludeObfuscation *bool `json:"include_obfuscation,omitempty"`
 }
@@ -282,6 +298,9 @@ func (r *GeneralOpenAIRequest) ParseInput() []string {
 }
 
 type Message struct {
+	Audio            json.RawMessage `json:"audio,omitempty"`
+	Refusal          *string         `json:"refusal,omitempty"`
+	FunctionCall     json.RawMessage `json:"function_call,omitempty"`
 	Role             string          `json:"role"`
 	Content          any             `json:"content"`
 	Name             *string         `json:"name,omitempty"`
@@ -302,12 +321,14 @@ func (m *Message) GetReasoningContent() string {
 }
 
 type MediaContent struct {
-	Type       string `json:"type"`
-	Text       string `json:"text,omitempty"`
-	ImageUrl   any    `json:"image_url,omitempty"`
-	InputAudio any    `json:"input_audio,omitempty"`
-	File       any    `json:"file,omitempty"`
-	VideoUrl   any    `json:"video_url,omitempty"`
+	PromptCacheBreakpoint json.RawMessage `json:"prompt_cache_breakpoint,omitempty"`
+	Refusal               *string         `json:"refusal,omitempty"`
+	Type                  string          `json:"type"`
+	Text                  string          `json:"text,omitempty"`
+	ImageUrl              any             `json:"image_url,omitempty"`
+	InputAudio            any             `json:"input_audio,omitempty"`
+	File                  any             `json:"file,omitempty"`
+	VideoUrl              any             `json:"video_url,omitempty"`
 	// OpenRouter Params
 	CacheControl json.RawMessage `json:"cache_control,omitempty"`
 }
@@ -461,7 +482,7 @@ func (m *Message) ParseToolCalls() []ToolCallRequest {
 		return nil
 	}
 	var toolCalls []ToolCallRequest
-	if err := json.Unmarshal(m.ToolCalls, &toolCalls); err == nil {
+	if err := common.Unmarshal(m.ToolCalls, &toolCalls); err == nil {
 		return toolCalls
 	}
 	return toolCalls
@@ -541,6 +562,9 @@ func (m *Message) ParseContent() []MediaContent {
 	// 尝试解析为数组
 	//var arrayContent []map[string]interface{}
 
+	if parts, ok := m.Content.([]MediaContent); ok {
+		return parts
+	}
 	arrayContent, ok := m.Content.([]any)
 	if !ok {
 		return contentList
@@ -562,7 +586,12 @@ func (m *Message) ParseContent() []MediaContent {
 			continue
 		}
 
+		before := len(contentList)
 		switch contentType {
+		case "refusal":
+			if refusal, ok := contentItem["refusal"].(string); ok {
+				contentList = append(contentList, MediaContent{Type: "refusal", Refusal: &refusal})
+			}
 		case ContentTypeText:
 			if text, ok := contentItem["text"].(string); ok {
 				contentList = append(contentList, MediaContent{
@@ -641,6 +670,11 @@ func (m *Message) ParseContent() []MediaContent {
 						Url: videoUrl,
 					},
 				})
+			}
+		}
+		if len(contentList) > before {
+			if bp, ok := contentItem["prompt_cache_breakpoint"]; ok {
+				contentList[len(contentList)-1].PromptCacheBreakpoint, _ = common.Marshal(bp)
 			}
 		}
 	}
@@ -835,8 +869,8 @@ type OpenAIResponsesRequest struct {
 	Model   string          `json:"model"`
 	Input   json.RawMessage `json:"input,omitempty"`
 	Include json.RawMessage `json:"include,omitempty"`
-	// 在后台运行推理，暂时还不支持依赖的接口
-	// Background         json.RawMessage `json:"background,omitempty"`
+	// Background true requires retrieval and deferred settlement, not yet supported.
+	Background         *bool           `json:"background,omitempty"`
 	Conversation       json.RawMessage `json:"conversation,omitempty"`
 	ContextManagement  json.RawMessage `json:"context_management,omitempty"`
 	Instructions       json.RawMessage `json:"instructions,omitempty"`
@@ -854,6 +888,8 @@ type OpenAIResponsesRequest struct {
 	Store                json.RawMessage `json:"store,omitempty"`
 	PromptCacheKey       json.RawMessage `json:"prompt_cache_key,omitempty"`
 	PromptCacheRetention json.RawMessage `json:"prompt_cache_retention,omitempty"`
+	PromptCacheOptions   json.RawMessage `json:"prompt_cache_options,omitempty"`
+	Moderation           json.RawMessage `json:"moderation,omitempty"`
 	// SafetyIdentifier carries client identity for policy abuse detection.
 	// This field is filtered by default and can be enabled via channel setting allow_safety_identifier.
 	SafetyIdentifier json.RawMessage `json:"safety_identifier,omitempty"`
@@ -952,8 +988,11 @@ func (r *OpenAIResponsesRequest) GetToolsMap() []map[string]any {
 }
 
 type Reasoning struct {
-	Effort  string `json:"effort,omitempty"`
-	Summary string `json:"summary,omitempty"`
+	Context         *string `json:"context,omitempty"`
+	Mode            *string `json:"mode,omitempty"`
+	GenerateSummary *string `json:"generate_summary,omitempty"`
+	Effort          string  `json:"effort,omitempty"`
+	Summary         string  `json:"summary,omitempty"`
 }
 
 type Input struct {

@@ -86,7 +86,7 @@ func TestConvertSpeechRequestDefaults(t *testing.T) {
 	reader, err := (&Adaptor{}).ConvertAudioRequest(c, info, dto.AudioRequest{
 		Model: "gcp-text-to-speech",
 		Input: "你好",
-		Voice: "alloy",
+		Voice: dto.AudioVoice{Name: "alloy"},
 		Speed: &speed,
 	})
 	if err != nil {

@@ -78,6 +78,10 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	)
 
 	if relayFormat == types.RelayFormatOpenAIRealtime {
+		if common.GetContextKeyInt(c, constant.ContextKeyChannelType) == constant.ChannelTypeOpenAI && dto.IsRealtimeBetaRequest(c.Request.Header) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": types.OpenAIError{Type: "invalid_request_error", Code: "realtime_beta_not_supported", Param: "OpenAI-Beta", Message: "Realtime Beta is no longer supported; remove the Beta header/subprotocol and migrate the client to Realtime GA"}})
+			return
+		}
 		var err error
 		ws, err = upgrader.Upgrade(c.Writer, c.Request, nil)
 		if err != nil {

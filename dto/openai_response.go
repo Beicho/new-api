@@ -3,6 +3,7 @@ package dto
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/QuantumNous/new-api/common"
 
 	"github.com/QuantumNous/new-api/types"
 )
@@ -31,19 +32,21 @@ type TextResponse struct {
 }
 
 type OpenAITextResponseChoice struct {
-	Index        int `json:"index"`
+	Logprobs     json.RawMessage `json:"logprobs,omitempty"`
+	Index        int             `json:"index"`
 	Message      `json:"message"`
 	FinishReason string `json:"finish_reason"`
 }
 
 type OpenAITextResponse struct {
-	Id      string                     `json:"id"`
-	Model   string                     `json:"model"`
-	Object  string                     `json:"object"`
-	Created any                        `json:"created"`
-	Choices []OpenAITextResponseChoice `json:"choices"`
-	Error   any                        `json:"error,omitempty"`
-	Usage   `json:"usage"`
+	ServiceTier json.RawMessage            `json:"service_tier,omitempty"`
+	Id          string                     `json:"id"`
+	Model       string                     `json:"model"`
+	Object      string                     `json:"object"`
+	Created     any                        `json:"created"`
+	Choices     []OpenAITextResponseChoice `json:"choices"`
+	Error       any                        `json:"error,omitempty"`
+	Usage       `json:"usage"`
 }
 
 // GetOpenAIError 从动态错误类型中提取OpenAIError结构
@@ -85,6 +88,9 @@ type ChatCompletionsStreamResponseChoice struct {
 }
 
 type ChatCompletionsStreamResponseChoiceDelta struct {
+	Audio            json.RawMessage    `json:"audio,omitempty"`
+	Refusal          *string            `json:"refusal,omitempty"`
+	FunctionCall     json.RawMessage    `json:"function_call,omitempty"`
 	Content          *string            `json:"content,omitempty"`
 	ReasoningContent *string            `json:"reasoning_content,omitempty"`
 	Reasoning        *string            `json:"reasoning,omitempty"`
@@ -119,11 +125,26 @@ func (c *ChatCompletionsStreamResponseChoiceDelta) SetReasoningContent(s string)
 }
 
 type ToolCallResponse struct {
+	Custom json.RawMessage `json:"custom,omitempty"`
 	// Index is not nil only in chat completion chunk object
 	Index    *int             `json:"index,omitempty"`
 	ID       string           `json:"id,omitempty"`
 	Type     any              `json:"type"`
 	Function FunctionResponse `json:"function"`
+}
+
+func (t ToolCallResponse) MarshalJSON() ([]byte, error) {
+	type alias ToolCallResponse
+	body, err := common.Marshal(alias(t))
+	if err != nil || t.Type != "custom" {
+		return body, err
+	}
+	var fields map[string]json.RawMessage
+	if err := common.Unmarshal(body, &fields); err != nil {
+		return nil, err
+	}
+	delete(fields, "function")
+	return common.Marshal(fields)
 }
 
 func (c *ToolCallResponse) SetIndex(i int) {
@@ -139,6 +160,8 @@ type FunctionResponse struct {
 }
 
 type ChatCompletionsStreamResponse struct {
+	ServiceTier       json.RawMessage                       `json:"service_tier,omitempty"`
+	Obfuscation       json.RawMessage                       `json:"obfuscation,omitempty"`
 	Id                string                                `json:"id"`
 	Object            string                                `json:"object"`
 	Created           int64                                 `json:"created"`
@@ -186,6 +209,8 @@ func (c *ChatCompletionsStreamResponse) Copy() *ChatCompletionsStreamResponse {
 	choices := make([]ChatCompletionsStreamResponseChoice, len(c.Choices))
 	copy(choices, c.Choices)
 	return &ChatCompletionsStreamResponse{
+		ServiceTier:       c.ServiceTier,
+		Obfuscation:       c.Obfuscation,
 		Id:                c.Id,
 		Object:            c.Object,
 		Created:           c.Created,
@@ -253,11 +278,21 @@ type OpenAIVideoResponse struct {
 }
 
 type InputTokenDetails struct {
-	CachedTokens         int `json:"cached_tokens"`
-	CachedCreationTokens int `json:"cached_creation_tokens,omitempty"`
-	TextTokens           int `json:"text_tokens"`
-	AudioTokens          int `json:"audio_tokens"`
-	ImageTokens          int `json:"image_tokens"`
+	CacheWriteTokens     *int `json:"cache_write_tokens,omitempty"`
+	CachedTokens         int  `json:"cached_tokens"`
+	CachedCreationTokens int  `json:"cached_creation_tokens,omitempty"`
+	TextTokens           int  `json:"text_tokens"`
+	AudioTokens          int  `json:"audio_tokens"`
+	ImageTokens          int  `json:"image_tokens"`
+}
+
+// GetCacheCreationTokens treats the official and legacy spellings as aliases,
+// including an explicitly reported zero. They must never be added together.
+func (d InputTokenDetails) GetCacheCreationTokens() int {
+	if d.CacheWriteTokens != nil {
+		return *d.CacheWriteTokens
+	}
+	return d.CachedCreationTokens
 }
 
 type OutputTokenDetails struct {
@@ -338,6 +373,7 @@ type IncompleteDetails struct {
 }
 
 type ResponsesOutput struct {
+	Input     string                   `json:"input,omitempty"`
 	Type      string                   `json:"type"`
 	ID        string                   `json:"id"`
 	Status    string                   `json:"status"`
@@ -351,6 +387,7 @@ type ResponsesOutput struct {
 }
 
 type ResponsesOutputContent struct {
+	Refusal     *string       `json:"refusal,omitempty"`
 	Type        string        `json:"type"`
 	Text        string        `json:"text"`
 	Annotations []interface{} `json:"annotations"`

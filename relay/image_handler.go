@@ -65,7 +65,17 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 		if err != nil {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 		}
-		if shouldApplyImageEditParamOverride(info) {
+		if shouldApplyImageEditParamOverride(info) && info.ChannelType == constant.ChannelTypeOpenAI && strings.HasPrefix(c.GetHeader("Content-Type"), "application/json") {
+			body, err := storage.Bytes()
+			if err != nil {
+				return types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
+			}
+			body, err = relaycommon.ApplyParamOverrideWithRelayInfo(body, info)
+			if err != nil {
+				return newAPIErrorFromParamOverride(err)
+			}
+			requestBody = bytes.NewReader(body)
+		} else if shouldApplyImageEditParamOverride(info) {
 			body, err := storage.Bytes()
 			if err != nil {
 				return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
@@ -134,6 +144,9 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 	if resp != nil {
 		httpResp = resp.(*http.Response)
 		info.IsStream = info.IsStream || strings.HasPrefix(httpResp.Header.Get("Content-Type"), "text/event-stream")
+		if info.ChannelType == constant.ChannelTypeOpenAI {
+			info.IsStream = strings.HasPrefix(httpResp.Header.Get("Content-Type"), "text/event-stream")
+		}
 		if httpResp.StatusCode != http.StatusOK {
 			if httpResp.StatusCode == http.StatusCreated && info.ApiType == constant.APITypeReplicate {
 				// replicate channel returns 201 Created when using Prefer: wait, treat it as success.
@@ -169,11 +182,13 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 		}
 	}
 
-	if usage.(*dto.Usage).TotalTokens == 0 {
-		usage.(*dto.Usage).TotalTokens = 1
-	}
-	if usage.(*dto.Usage).PromptTokens == 0 {
-		usage.(*dto.Usage).PromptTokens = 1
+	if info.ChannelType != constant.ChannelTypeOpenAI || !c.GetBool("openai_media_usage_reported") {
+		if usage.(*dto.Usage).TotalTokens == 0 {
+			usage.(*dto.Usage).TotalTokens = 1
+		}
+		if usage.(*dto.Usage).PromptTokens == 0 {
+			usage.(*dto.Usage).PromptTokens = 1
+		}
 	}
 
 	quality := "standard"

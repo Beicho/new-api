@@ -1,6 +1,28 @@
 package dto
 
-import "github.com/QuantumNous/new-api/types"
+import (
+	"github.com/QuantumNous/new-api/types"
+	"net/http"
+	"strings"
+)
+
+func IsRealtimeBetaRequest(header http.Header) bool {
+	for _, value := range header.Values("OpenAI-Beta") {
+		for _, item := range strings.Split(value, ",") {
+			if strings.TrimSpace(strings.ToLower(item)) == "realtime=v1" {
+				return true
+			}
+		}
+	}
+	for _, value := range header.Values("Sec-WebSocket-Protocol") {
+		for _, item := range strings.Split(value, ",") {
+			if strings.TrimSpace(item) == "openai-beta.realtime-v1" {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 const (
 	RealtimeEventTypeError              = "error"
@@ -12,6 +34,9 @@ const (
 
 const (
 	RealtimeEventTypeResponseDone                   = "response.done"
+	RealtimeEventResponseOutputAudioDelta           = "response.output_audio.delta"
+	RealtimeEventResponseOutputAudioTranscriptDelta = "response.output_audio_transcript.delta"
+	RealtimeEventResponseOutputTextDelta            = "response.output_text.delta"
 	RealtimeEventTypeSessionUpdated                 = "session.updated"
 	RealtimeEventTypeSessionCreated                 = "session.created"
 	RealtimeEventResponseAudioDelta                 = "response.audio.delta"
@@ -34,6 +59,7 @@ type RealtimeEvent struct {
 }
 
 type RealtimeResponse struct {
+	ID    string         `json:"id"`
 	Usage *RealtimeUsage `json:"usage"`
 }
 
@@ -46,6 +72,8 @@ type RealtimeUsage struct {
 }
 
 type RealtimeSession struct {
+	Type                    *string                 `json:"type,omitempty"`
+	Audio                   *RealtimeAudio          `json:"audio,omitempty"`
 	Modalities              []string                `json:"modalities"`
 	Instructions            string                  `json:"instructions"`
 	Voice                   string                  `json:"voice"`
@@ -57,6 +85,46 @@ type RealtimeSession struct {
 	ToolChoice              string                  `json:"tool_choice"`
 	Temperature             float64                 `json:"temperature"`
 	//MaxResponseOutputTokens int                     `json:"max_response_output_tokens"`
+}
+
+type RealtimeAudio struct {
+	Input  *RealtimeAudioConfig `json:"input,omitempty"`
+	Output *RealtimeAudioConfig `json:"output,omitempty"`
+}
+
+type RealtimeAudioConfig struct {
+	Format *RealtimeAudioFormat `json:"format,omitempty"`
+}
+
+type RealtimeAudioFormat struct {
+	Type string `json:"type"`
+	Rate *int   `json:"rate,omitempty"`
+}
+
+func (s *RealtimeSession) AudioFormats() (string, string) {
+	in, out := s.InputAudioFormat, s.OutputAudioFormat
+	if s.Audio != nil {
+		if s.Audio.Input != nil && s.Audio.Input.Format != nil {
+			in = s.Audio.Input.Format.LegacyName()
+		}
+		if s.Audio.Output != nil && s.Audio.Output.Format != nil {
+			out = s.Audio.Output.Format.LegacyName()
+		}
+	}
+	return in, out
+}
+
+func (f *RealtimeAudioFormat) LegacyName() string {
+	switch f.Type {
+	case "audio/pcm":
+		return "pcm16"
+	case "audio/pcmu":
+		return "g711_ulaw"
+	case "audio/pcma":
+		return "g711_alaw"
+	default:
+		return f.Type
+	}
 }
 
 type InputAudioTranscription struct {

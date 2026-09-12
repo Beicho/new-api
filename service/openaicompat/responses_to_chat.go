@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 )
 
@@ -30,9 +31,10 @@ func ResponsesResponseToChatCompletionsResponse(resp *dto.OpenAIResponsesRespons
 			usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 		}
 		if resp.Usage.InputTokensDetails != nil {
-			usage.PromptTokensDetails.CachedTokens = resp.Usage.InputTokensDetails.CachedTokens
-			usage.PromptTokensDetails.ImageTokens = resp.Usage.InputTokensDetails.ImageTokens
-			usage.PromptTokensDetails.AudioTokens = resp.Usage.InputTokensDetails.AudioTokens
+			usage.PromptTokensDetails = *resp.Usage.InputTokensDetails
+		}
+		if resp.Usage.OutputTokensDetails != nil {
+			usage.CompletionTokenDetails = *resp.Usage.OutputTokensDetails
 		}
 		if resp.Usage.CompletionTokenDetails.ReasoningTokens != 0 {
 			usage.CompletionTokenDetails.ReasoningTokens = resp.Usage.CompletionTokenDetails.ReasoningTokens
@@ -42,9 +44,9 @@ func ResponsesResponseToChatCompletionsResponse(resp *dto.OpenAIResponsesRespons
 	created := resp.CreatedAt
 
 	var toolCalls []dto.ToolCallResponse
-	if text == "" && len(resp.Output) > 0 {
+	if len(resp.Output) > 0 {
 		for _, out := range resp.Output {
-			if out.Type != "function_call" {
+			if out.Type != "function_call" && out.Type != "custom_tool_call" {
 				continue
 			}
 			name := strings.TrimSpace(out.Name)
@@ -54,6 +56,14 @@ func ResponsesResponseToChatCompletionsResponse(resp *dto.OpenAIResponsesRespons
 			callId := strings.TrimSpace(out.CallId)
 			if callId == "" {
 				callId = strings.TrimSpace(out.ID)
+			}
+			if out.Type == "custom_tool_call" {
+				custom, err := common.Marshal(map[string]string{"name": name, "input": out.Input})
+				if err != nil {
+					return nil, nil, err
+				}
+				toolCalls = append(toolCalls, dto.ToolCallResponse{ID: callId, Type: "custom", Custom: custom})
+				continue
 			}
 			toolCalls = append(toolCalls, dto.ToolCallResponse{
 				ID:   callId,
@@ -77,9 +87,21 @@ func ResponsesResponseToChatCompletionsResponse(resp *dto.OpenAIResponsesRespons
 	}
 	if len(toolCalls) > 0 {
 		msg.SetToolCalls(toolCalls)
-		msg.Content = ""
+		if text == "" {
+			msg.Content = nil
+		}
 	}
 
+	for _, item := range resp.Output {
+		for _, part := range item.Content {
+			if part.Refusal != nil {
+				if msg.Refusal == nil {
+					msg.Refusal = new(string)
+				}
+				*msg.Refusal += *part.Refusal
+			}
+		}
+	}
 	out := &dto.OpenAITextResponse{
 		Id:      id,
 		Object:  "chat.completion",

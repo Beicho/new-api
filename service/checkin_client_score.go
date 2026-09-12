@@ -101,9 +101,13 @@ func clientEnvironmentScore(c *gin.Context) int {
 // 所有信号都是小权重累加并线性映射、不设阈值：改动任何单个请求头或单次
 // 签到时间只会让结果小幅移动，无法定位到具体命中了哪条规则。
 func CheckinClientScore(c *gin.Context, userId int) int {
+	return checkinClientScoreAt(c, userId, time.Now())
+}
+
+func checkinClientScoreAt(c *gin.Context, userId int, now time.Time) int {
 	setting := operation_setting.GetCheckinSetting()
 	if setting == nil || !setting.ClientCheckEnabled {
 		return 100
 	}
-	return clientEnvironmentScore(c) + checkinBehaviorScore(userId, time.Now())
+	return clientEnvironmentScore(c) + checkinBehaviorScore(userId, now)
 }

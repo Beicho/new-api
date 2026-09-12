@@ -221,14 +221,17 @@ func TestCheckinClientScoreCombinesHeaderAndBehaviour(t *testing.T) {
 	setting.ClientCheckEnabled = true
 	t.Cleanup(func() { *setting = old })
 
-	// 全新用户 + 浏览器请求头 = 满分
-	require.Equal(t, 100, CheckinClientScore(contextWithHeaders(browserHeaders()), 9005))
+	// 固定在中午，避免测试在零点运行时触发本次签到的掐点扣分。
+	now := time.Now().In(time.Local)
+	noon := time.Date(now.Year(), now.Month(), now.Day(), 12, 0, 0, 0, time.Local)
+	// 全新用户 + 浏览器请求头 + 非零点请求 = 满分
+	require.Equal(t, 100, checkinClientScoreAt(contextWithHeaders(browserHeaders()), 9005, noon))
 
 	// 无头浏览器（请求头完美）挂在 cron 上：请求头满分但行为分很低
 	for d := 1; d <= 7; d++ {
 		seedCheckinAt(t, 9006, d, 5)
 	}
-	headless := CheckinClientScore(contextWithHeaders(browserHeaders()), 9006)
+	headless := checkinClientScoreAt(contextWithHeaders(browserHeaders()), 9006, noon)
 	require.Less(t, headless, 100, "cron 驱动的无头浏览器不应拿到满分")
 	require.GreaterOrEqual(t, headless, checkinHeaderMaxScore,
 		"请求头完美时不应低于请求头上限")

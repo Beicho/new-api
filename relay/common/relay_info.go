@@ -390,13 +390,20 @@ func GenRelayInfoResponses(c *gin.Context, request *dto.OpenAIResponsesRequest) 
 	info := genBaseRelayInfo(c, request)
 	info.RelayMode = relayconstant.RelayModeResponses
 	info.RelayFormat = types.RelayFormatOpenAIResponses
+	info.InitResponsesUsageInfo(request)
+	return info
+}
 
+func (info *RelayInfo) InitResponsesUsageInfo(request *dto.OpenAIResponsesRequest) {
 	info.ResponsesUsageInfo = &ResponsesUsageInfo{
 		BuiltInTools: make(map[string]*BuildInToolInfo),
 	}
 	if len(request.Tools) > 0 {
 		for _, tool := range request.GetToolsMap() {
 			toolType := common.Interface2String(tool["type"])
+			if toolType == "web_search" || strings.HasPrefix(toolType, "web_search_preview_") {
+				toolType = dto.BuildInToolWebSearchPreview
+			}
 			info.ResponsesUsageInfo.BuiltInTools[toolType] = &BuildInToolInfo{
 				ToolName:  toolType,
 				CallCount: 0,
@@ -411,7 +418,6 @@ func GenRelayInfoResponses(c *gin.Context, request *dto.OpenAIResponsesRequest) 
 			}
 		}
 	}
-	return info
 }
 
 func GenRelayInfoGemini(c *gin.Context, request dto.Request) *RelayInfo {
@@ -850,7 +856,7 @@ func FailTaskInfo(reason string) *TaskInfo {
 // speed: Claude 推理速度模式字段（仅 Claude 支持，默认过滤）
 // store: 数据存储授权字段，涉及用户隐私（仅 OpenAI、Responses API 支持，默认允许透传，禁用后可能导致 Codex 无法使用）
 // safety_identifier: 安全标识符，用于向 OpenAI 报告违规用户（仅 OpenAI 支持，涉及用户隐私）
-// stream_options.include_obfuscation: 响应流混淆控制字段（仅 OpenAI Responses API 支持）
+// stream_options.include_obfuscation: 响应流混淆控制字段（OpenAI Chat Completions 和 Responses API 支持）
 func RemoveDisabledFields(jsonData []byte, channelOtherSettings dto.ChannelOtherSettings, channelPassThroughEnabled bool) ([]byte, error) {
 	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || channelPassThroughEnabled {
 		return jsonData, nil

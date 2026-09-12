@@ -1318,7 +1318,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 			return &dto.AudioRequest{
 				Model:          model,
 				Input:          "你好，这是一次渠道测试。",
-				Voice:          "cmn-CN-Wavenet-A",
+				Voice:          dto.AudioVoice{Name: "cmn-CN-Wavenet-A"},
 				ResponseFormat: "mp3",
 			}
 		case constant.EndpointTypeAudioTranscription:
