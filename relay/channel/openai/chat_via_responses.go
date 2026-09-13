@@ -59,13 +59,17 @@ func OaiResponsesToChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
 	}
 
+	record := newResponsesToolRecorder(info)
+	for _, item := range responsesResp.Output {
+		record(item)
+	}
 	chatId := helper.GetResponseID(c)
 	chatResp, usage, err := service.ResponsesResponseToChatCompletionsResponse(&responsesResp, chatId)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
 
-	if usage == nil || usage.TotalTokens == 0 {
+	if responsesResp.Usage == nil {
 		text := service.ExtractOutputTextFromResponses(&responsesResp)
 		usage = service.ResponseText2Usage(c, text, info.UpstreamModelName, info.GetEstimatePromptTokens())
 		chatResp.Usage = *usage
@@ -108,9 +112,12 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		sentStart   bool
 		sentStop    bool
 		sawToolCall bool
+		hasUsage    bool
 		streamErr   *types.NewAPIError
 	)
 
+	record := newResponsesToolRecorder(info)
+	customToolCalls := make(map[string]bool)
 	toolCallIndexByID := make(map[string]int)
 	toolCallNameByID := make(map[string]string)
 	toolCallArgsByID := make(map[string]string)
@@ -234,10 +241,6 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		if callID == "" {
 			return true
 		}
-		if outputText.Len() > 0 {
-			// Prefer streaming assistant text over tool calls to match non-stream behavior.
-			return true
-		}
 		if !sendStartIfNeeded() {
 			return false
 		}
@@ -267,6 +270,14 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			toolCallNameSent[callID] = true
 		}
 
+		if customToolCalls[callID] {
+			tool.Type = "custom"
+			custom := map[string]string{"input": argsDelta}
+			if tool.Function.Name != "" {
+				custom["name"] = tool.Function.Name
+			}
+			tool.Custom, _ = common.Marshal(custom)
+		}
 		chunk := &dto.ChatCompletionsStreamResponse{
 			Id:      responseId,
 			Object:  "chat.completion.chunk",
@@ -357,7 +368,7 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		//		return
 		//	}
 
-		case "response.output_text.delta":
+		case "response.output_text.delta", "response.refusal.delta":
 			if !sendStartIfNeeded() {
 				sr.Stop(streamErr)
 				return
@@ -381,6 +392,10 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 						},
 					},
 				}
+				if streamResp.Type == "response.refusal.delta" {
+					chunk.Choices[0].Delta.Content = nil
+					chunk.Choices[0].Delta.Refusal = &delta
+				}
 				if !sendChatChunk(chunk) {
 					sr.Stop(streamErr)
 					return
@@ -391,7 +406,10 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			if streamResp.Item == nil {
 				break
 			}
-			if streamResp.Item.Type != "function_call" {
+			if streamResp.Type == "response.output_item.done" {
+				record(*streamResp.Item)
+			}
+			if streamResp.Item.Type != "function_call" && streamResp.Item.Type != "custom_tool_call" {
 				break
 			}
 
@@ -403,12 +421,18 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			if itemID != "" && callID != "" {
 				toolCallCanonicalIDByItemID[itemID] = callID
 			}
+			if streamResp.Item.Type == "custom_tool_call" {
+				customToolCalls[callID] = true
+			}
 			name := strings.TrimSpace(streamResp.Item.Name)
 			if name != "" {
 				toolCallNameByID[callID] = name
 			}
 
 			newArgs := streamResp.Item.Arguments
+			if customToolCalls[callID] {
+				newArgs = streamResp.Item.Input
+			}
 			prevArgs := toolCallArgsByID[callID]
 			argsDelta := ""
 			if newArgs != "" {
@@ -425,7 +449,7 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 				return
 			}
 
-		case "response.function_call_arguments.delta":
+		case "response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
 			itemID := strings.TrimSpace(streamResp.ItemID)
 			callID := toolCallCanonicalIDByItemID[itemID]
 			if callID == "" {
@@ -433,6 +457,9 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			}
 			if callID == "" {
 				break
+			}
+			if streamResp.Type == "response.custom_tool_call_input.delta" {
+				customToolCalls[callID] = true
 			}
 			toolCallArgsByID[callID] += streamResp.Delta
 			if !sendToolCallDelta(callID, "", streamResp.Delta) {
@@ -450,28 +477,12 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 				if streamResp.Response.CreatedAt != 0 {
 					createAt = int64(streamResp.Response.CreatedAt)
 				}
+				for _, item := range streamResp.Response.Output {
+					record(item)
+				}
 				if streamResp.Response.Usage != nil {
-					if streamResp.Response.Usage.InputTokens != 0 {
-						usage.PromptTokens = streamResp.Response.Usage.InputTokens
-						usage.InputTokens = streamResp.Response.Usage.InputTokens
-					}
-					if streamResp.Response.Usage.OutputTokens != 0 {
-						usage.CompletionTokens = streamResp.Response.Usage.OutputTokens
-						usage.OutputTokens = streamResp.Response.Usage.OutputTokens
-					}
-					if streamResp.Response.Usage.TotalTokens != 0 {
-						usage.TotalTokens = streamResp.Response.Usage.TotalTokens
-					} else {
-						usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
-					}
-					if streamResp.Response.Usage.InputTokensDetails != nil {
-						usage.PromptTokensDetails.CachedTokens = streamResp.Response.Usage.InputTokensDetails.CachedTokens
-						usage.PromptTokensDetails.ImageTokens = streamResp.Response.Usage.InputTokensDetails.ImageTokens
-						usage.PromptTokensDetails.AudioTokens = streamResp.Response.Usage.InputTokensDetails.AudioTokens
-					}
-					if streamResp.Response.Usage.CompletionTokenDetails.ReasoningTokens != 0 {
-						usage.CompletionTokenDetails.ReasoningTokens = streamResp.Response.Usage.CompletionTokenDetails.ReasoningTokens
-					}
+					*usage = normalizeResponsesUsage(streamResp.Response.Usage)
+					hasUsage = true
 				}
 			}
 
@@ -484,7 +495,7 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 					info.ClaudeConvertInfo.Usage = usage
 				}
 				finishReason := "stop"
-				if sawToolCall && outputText.Len() == 0 {
+				if sawToolCall {
 					finishReason = "tool_calls"
 				}
 				stop := helper.GenerateStopResponse(responseId, createAt, model, finishReason)
@@ -515,7 +526,7 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		return nil, streamErr
 	}
 
-	if usage.TotalTokens == 0 {
+	if !hasUsage {
 		usage = service.ResponseText2Usage(c, usageText.String(), info.UpstreamModelName, info.GetEstimatePromptTokens())
 	}
 
@@ -529,7 +540,7 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			info.ClaudeConvertInfo.Usage = usage
 		}
 		finishReason := "stop"
-		if sawToolCall && outputText.Len() == 0 {
+		if sawToolCall {
 			finishReason = "tool_calls"
 		}
 		stop := helper.GenerateStopResponse(responseId, createAt, model, finishReason)

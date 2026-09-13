@@ -59,6 +59,9 @@ func InitOptionMap() {
 	common.OptionMap["EmailAliasRestrictionEnabled"] = strconv.FormatBool(common.EmailAliasRestrictionEnabled)
 	common.OptionMap["EmailCaseInsensitiveEnabled"] = strconv.FormatBool(common.EmailCaseInsensitiveEnabled)
 	common.OptionMap["EmailDomainWhitelist"] = strings.Join(common.EmailDomainWhitelist, ",")
+	common.OptionMap["EmailDomainInviteCodeExemptionList"] = strings.Join(common.EmailDomainInviteCodeExemptionList, ",")
+	common.OptionMap["EmailDomainRegistrationCodeExemptionList"] = strings.Join(common.EmailDomainRegistrationCodeExemptionList, ",")
+	common.OptionMap["EmailDomainBlacklist"] = strings.Join(common.EmailDomainBlacklist, ",")
 	common.OptionMap["SMTPServer"] = ""
 	common.OptionMap["SMTPFrom"] = ""
 	common.OptionMap["SMTPPort"] = strconv.Itoa(common.SMTPPort)
@@ -195,7 +198,12 @@ func InitOptionMap() {
 }
 
 func loadOptionsFromDatabase() {
-	options, _ := AllOption()
+	options, err := AllOption()
+	if err != nil {
+		common.SysLog("failed to load options from database: " + err.Error())
+		return
+	}
+	options = withEmailDomainExemptionOptions(options)
 	for _, option := range options {
 		err := updateOptionMap(option.Key, option.Value)
 		if err != nil {
@@ -342,6 +350,12 @@ func updateOptionMap(key string, value string) (err error) {
 	switch key {
 	case "EmailDomainWhitelist":
 		common.EmailDomainWhitelist = strings.Split(value, ",")
+	case "EmailDomainInviteCodeExemptionList":
+		common.EmailDomainInviteCodeExemptionList = strings.Split(value, ",")
+	case "EmailDomainRegistrationCodeExemptionList":
+		common.EmailDomainRegistrationCodeExemptionList = strings.Split(value, ",")
+	case "EmailDomainBlacklist":
+		common.EmailDomainBlacklist = strings.Split(value, ",")
 	case "SMTPServer":
 		common.SMTPServer = value
 	case "SMTPPort":

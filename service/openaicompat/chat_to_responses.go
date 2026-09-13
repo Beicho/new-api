@@ -83,193 +83,112 @@ func ChatCompletionsRequestToResponsesRequest(req *dto.GeneralOpenAIRequest) (*d
 	if lo.FromPtrOr(req.N, 1) > 1 {
 		return nil, fmt.Errorf("n>1 is not supported in responses compatibility mode")
 	}
+	if (len(req.Functions) > 0 && string(req.Functions) != "null") || (len(req.FunctionCall) > 0 && string(req.FunctionCall) != "null") {
+		return nil, errors.New("legacy functions/function_call are not supported in responses compatibility mode; use tools/tool_choice or native Chat Completions")
+	}
 
+	if len(req.Audio) > 0 && string(req.Audio) != "null" {
+		return nil, errors.New("audio is not supported in responses compatibility mode; use native Chat Completions")
+	}
+	var modalities []string
+	if len(req.Modalities) > 0 {
+		if err := common.Unmarshal(req.Modalities, &modalities); err != nil {
+			return nil, err
+		}
+		for _, modality := range modalities {
+			if modality != "text" {
+				return nil, fmt.Errorf("modality %q is not supported in responses compatibility mode", modality)
+			}
+		}
+	}
 	var instructionsParts []string
 	inputItems := make([]map[string]any, 0, len(req.Messages))
-
+	customCalls := make(map[string]bool)
+	preserveInstructions := false
+	for _, msg := range req.Messages {
+		for _, call := range msg.ParseToolCalls() {
+			if call.Type == "custom" {
+				customCalls[call.ID] = true
+			}
+		}
+		if msg.Role == "system" || msg.Role == "developer" {
+			for _, part := range msg.ParseContent() {
+				if len(part.PromptCacheBreakpoint) > 0 {
+					preserveInstructions = true
+				}
+			}
+		}
+	}
 	for _, msg := range req.Messages {
 		role := strings.TrimSpace(msg.Role)
 		if role == "" {
 			continue
 		}
-
+		if (len(msg.Audio) > 0 && string(msg.Audio) != "null") || (len(msg.FunctionCall) > 0 && string(msg.FunctionCall) != "null") {
+			return nil, errors.New("message audio and legacy function_call cannot be represented in responses compatibility mode")
+		}
+		parts, err := chatContentToResponses(msg)
+		if err != nil {
+			return nil, err
+		}
 		if role == "tool" || role == "function" {
 			callID := strings.TrimSpace(msg.ToolCallId)
-
-			var output any
-			if msg.Content == nil {
-				output = ""
-			} else if msg.IsStringContent() {
-				output = msg.StringContent()
-			} else {
-				if b, err := common.Marshal(msg.Content); err == nil {
-					output = string(b)
-				} else {
-					output = fmt.Sprintf("%v", msg.Content)
-				}
-			}
-
-			if callID == "" {
-				inputItems = append(inputItems, map[string]any{
-					"role":    "user",
-					"content": fmt.Sprintf("[tool_output_missing_call_id] %v", output),
-				})
-				continue
-			}
-
-			inputItems = append(inputItems, map[string]any{
-				"type":    "function_call_output",
-				"call_id": callID,
-				"output":  output,
-			})
-			continue
-		}
-
-		// Prefer mapping system/developer messages into `instructions`.
-		if role == "system" || role == "developer" {
-			if msg.Content == nil {
-				continue
-			}
+			var output any = ""
 			if msg.IsStringContent() {
-				if s := strings.TrimSpace(msg.StringContent()); s != "" {
-					instructionsParts = append(instructionsParts, s)
-				}
+				output = msg.StringContent()
+			} else if len(parts) > 0 {
+				output = parts
+			}
+			if callID == "" {
+				inputItems = append(inputItems, map[string]any{"role": "user", "content": fmt.Sprintf("[tool_output_missing_call_id] %v", output)})
 				continue
 			}
-			parts := msg.ParseContent()
-			var sb strings.Builder
+			itemType := "function_call_output"
+			if customCalls[callID] {
+				itemType = "custom_tool_call_output"
+			}
+			inputItems = append(inputItems, map[string]any{"type": itemType, "call_id": callID, "output": output})
+			continue
+		}
+		if (role == "system" || role == "developer") && !preserveInstructions {
+			var texts []string
 			for _, part := range parts {
-				if part.Type == dto.ContentTypeText && strings.TrimSpace(part.Text) != "" {
-					if sb.Len() > 0 {
-						sb.WriteString("\n")
-					}
-					sb.WriteString(part.Text)
+				if txt, ok := part["text"].(string); ok && strings.TrimSpace(txt) != "" {
+					texts = append(texts, txt)
 				}
 			}
-			if s := strings.TrimSpace(sb.String()); s != "" {
-				instructionsParts = append(instructionsParts, s)
+			if len(texts) > 0 {
+				instructionsParts = append(instructionsParts, strings.Join(texts, "\n"))
 			}
 			continue
 		}
-
-		item := map[string]any{
-			"role": role,
+		if msg.Refusal != nil {
+			parts = append(parts, map[string]any{"type": "refusal", "refusal": *msg.Refusal})
 		}
-
-		if msg.Content == nil {
-			item["content"] = ""
-			inputItems = append(inputItems, item)
-
-			if role == "assistant" {
-				for _, tc := range msg.ParseToolCalls() {
-					if strings.TrimSpace(tc.ID) == "" {
-						continue
-					}
-					if tc.Type != "" && tc.Type != "function" {
-						continue
-					}
-					name := strings.TrimSpace(tc.Function.Name)
-					if name == "" {
-						continue
-					}
-					inputItems = append(inputItems, map[string]any{
-						"type":      "function_call",
-						"call_id":   tc.ID,
-						"name":      name,
-						"arguments": tc.Function.Arguments,
-					})
-				}
-			}
-			continue
+		if msg.IsStringContent() && msg.Refusal == nil {
+			inputItems = append(inputItems, map[string]any{"role": role, "content": msg.StringContent()})
+		} else if len(parts) > 0 {
+			inputItems = append(inputItems, map[string]any{"role": role, "content": parts})
+		} else if len(msg.ToolCalls) == 0 {
+			inputItems = append(inputItems, map[string]any{"role": role, "content": ""})
 		}
-
-		if msg.IsStringContent() {
-			item["content"] = msg.StringContent()
-			inputItems = append(inputItems, item)
-
-			if role == "assistant" {
-				for _, tc := range msg.ParseToolCalls() {
-					if strings.TrimSpace(tc.ID) == "" {
-						continue
-					}
-					if tc.Type != "" && tc.Type != "function" {
-						continue
-					}
-					name := strings.TrimSpace(tc.Function.Name)
-					if name == "" {
-						continue
-					}
-					inputItems = append(inputItems, map[string]any{
-						"type":      "function_call",
-						"call_id":   tc.ID,
-						"name":      name,
-						"arguments": tc.Function.Arguments,
-					})
-				}
-			}
-			continue
-		}
-
-		parts := msg.ParseContent()
-		contentParts := make([]map[string]any, 0, len(parts))
-		for _, part := range parts {
-			switch part.Type {
-			case dto.ContentTypeText:
-				textType := "input_text"
-				if role == "assistant" {
-					textType = "output_text"
-				}
-				contentParts = append(contentParts, map[string]any{
-					"type": textType,
-					"text": part.Text,
-				})
-			case dto.ContentTypeImageURL:
-				contentParts = append(contentParts, map[string]any{
-					"type":      "input_image",
-					"image_url": normalizeChatImageURLToString(part.ImageUrl),
-				})
-			case dto.ContentTypeInputAudio:
-				contentParts = append(contentParts, map[string]any{
-					"type":        "input_audio",
-					"input_audio": part.InputAudio,
-				})
-			case dto.ContentTypeFile:
-				contentParts = append(contentParts, map[string]any{
-					"type": "input_file",
-					"file": part.File,
-				})
-			case dto.ContentTypeVideoUrl:
-				contentParts = append(contentParts, map[string]any{
-					"type":      "input_video",
-					"video_url": part.VideoUrl,
-				})
-			default:
-				contentParts = append(contentParts, map[string]any{
-					"type": part.Type,
-				})
-			}
-		}
-		item["content"] = contentParts
-		inputItems = append(inputItems, item)
-
 		if role == "assistant" {
-			for _, tc := range msg.ParseToolCalls() {
-				if strings.TrimSpace(tc.ID) == "" {
-					continue
+			for _, call := range msg.ParseToolCalls() {
+				if call.ID == "" {
+					return nil, errors.New("tool call id is required in responses compatibility mode")
 				}
-				if tc.Type != "" && tc.Type != "function" {
-					continue
+				switch call.Type {
+				case "", "function":
+					inputItems = append(inputItems, map[string]any{"type": "function_call", "call_id": call.ID, "name": call.Function.Name, "arguments": call.Function.Arguments})
+				case "custom":
+					var custom map[string]any
+					if err := common.Unmarshal(call.Custom, &custom); err != nil {
+						return nil, err
+					}
+					inputItems = append(inputItems, map[string]any{"type": "custom_tool_call", "call_id": call.ID, "name": custom["name"], "input": custom["input"]})
+				default:
+					return nil, fmt.Errorf("tool call type %q is not supported in responses compatibility mode", call.Type)
 				}
-				name := strings.TrimSpace(tc.Function.Name)
-				if name == "" {
-					continue
-				}
-				inputItems = append(inputItems, map[string]any{
-					"type":      "function_call",
-					"call_id":   tc.ID,
-					"name":      name,
-					"arguments": tc.Function.Arguments,
-				})
 			}
 		}
 	}
@@ -297,6 +216,16 @@ func ChatCompletionsRequestToResponsesRequest(req *dto.GeneralOpenAIRequest) (*d
 					"description": tool.Function.Description,
 					"parameters":  tool.Function.Parameters,
 				})
+				if tool.Function.Strict != nil {
+					tools[len(tools)-1]["strict"] = *tool.Function.Strict
+				}
+			case "custom":
+				var custom map[string]any
+				if err := common.Unmarshal(tool.Custom, &custom); err != nil {
+					return nil, err
+				}
+				custom["type"] = "custom"
+				tools = append(tools, custom)
 			default:
 				// Best-effort: keep original tool shape for unknown types.
 				var m map[string]any
@@ -324,18 +253,18 @@ func ChatCompletionsRequestToResponsesRequest(req *dto.GeneralOpenAIRequest) (*d
 			}
 			if m == nil {
 				toolChoiceRaw, _ = common.Marshal(v)
-			} else if t, _ := m["type"].(string); t == "function" {
+			} else if t, _ := m["type"].(string); t == "function" || t == "custom" {
 				// Chat: {"type":"function","function":{"name":"..."}}
 				// Responses: {"type":"function","name":"..."}
 				if name, ok := m["name"].(string); ok && name != "" {
 					toolChoiceRaw, _ = common.Marshal(map[string]any{
-						"type": "function",
+						"type": t,
 						"name": name,
 					})
-				} else if fn, ok := m["function"].(map[string]any); ok {
+				} else if fn, ok := m[t].(map[string]any); ok {
 					if name, ok := fn["name"].(string); ok && name != "" {
 						toolChoiceRaw, _ = common.Marshal(map[string]any{
-							"type": "function",
+							"type": t,
 							"name": name,
 						})
 					} else {
@@ -373,19 +302,48 @@ func ChatCompletionsRequestToResponsesRequest(req *dto.GeneralOpenAIRequest) (*d
 	}
 
 	out := &dto.OpenAIResponsesRequest{
-		Model:             req.Model,
-		Input:             inputRaw,
-		Instructions:      instructionsRaw,
-		Stream:            req.Stream,
-		Temperature:       req.Temperature,
-		Text:              textRaw,
-		ToolChoice:        toolChoiceRaw,
-		Tools:             toolsRaw,
-		TopP:              topP,
-		User:              req.User,
-		ParallelToolCalls: parallelToolCallsRaw,
-		Store:             req.Store,
-		Metadata:          req.Metadata,
+		Model:                req.Model,
+		Input:                inputRaw,
+		Instructions:         instructionsRaw,
+		Stream:               req.Stream,
+		Temperature:          req.Temperature,
+		Text:                 textRaw,
+		ToolChoice:           toolChoiceRaw,
+		Tools:                toolsRaw,
+		TopP:                 topP,
+		User:                 req.User,
+		ParallelToolCalls:    parallelToolCallsRaw,
+		Store:                req.Store,
+		Metadata:             req.Metadata,
+		PromptCacheOptions:   req.PromptCacheOptions,
+		PromptCacheRetention: req.PromptCacheRetention,
+		Moderation:           req.Moderation,
+		SafetyIdentifier:     req.SafetyIdentifier,
+		TopLogProbs:          req.TopLogProbs,
+	}
+	if req.PromptCacheKey != "" {
+		out.PromptCacheKey, _ = common.Marshal(req.PromptCacheKey)
+	}
+	if len(req.ServiceTier) > 0 && string(req.ServiceTier) != "null" {
+		if err := common.Unmarshal(req.ServiceTier, &out.ServiceTier); err != nil {
+			return nil, err
+		}
+	}
+	if req.StreamOptions != nil && req.StreamOptions.IncludeObfuscation != nil {
+		out.StreamOptions = &dto.StreamOptions{IncludeObfuscation: req.StreamOptions.IncludeObfuscation}
+	}
+	if len(req.Verbosity) > 0 {
+		var text map[string]json.RawMessage
+		if len(out.Text) > 0 {
+			if err := common.Unmarshal(out.Text, &text); err != nil {
+				return nil, err
+			}
+		}
+		if text == nil {
+			text = make(map[string]json.RawMessage)
+		}
+		text["verbosity"] = req.Verbosity
+		out.Text, _ = common.Marshal(text)
 	}
 	if req.MaxTokens != nil || req.MaxCompletionTokens != nil {
 		out.MaxOutputTokens = lo.ToPtr(maxOutputTokens)
@@ -399,4 +357,48 @@ func ChatCompletionsRequestToResponsesRequest(req *dto.GeneralOpenAIRequest) (*d
 	}
 
 	return out, nil
+}
+
+// chatContentToResponses keeps cache boundaries and media references intact.
+func chatContentToResponses(msg dto.Message) ([]map[string]any, error) {
+	var parts []map[string]any
+	for _, part := range msg.ParseContent() {
+		out := map[string]any{}
+		switch part.Type {
+		case dto.ContentTypeText:
+			out["type"] = "input_text"
+			if msg.Role == "assistant" {
+				out["type"] = "output_text"
+			}
+			out["text"] = part.Text
+		case dto.ContentTypeImageURL:
+			out["type"] = "input_image"
+			out["image_url"] = normalizeChatImageURLToString(part.ImageUrl)
+			if img := part.GetImageMedia(); img != nil && img.Detail != "" {
+				out["detail"] = img.Detail
+			}
+		case dto.ContentTypeFile:
+			body, err := common.Marshal(part.File)
+			if err != nil {
+				return nil, err
+			}
+			if err := common.Unmarshal(body, &out); err != nil {
+				return nil, err
+			}
+			if out == nil {
+				return nil, errors.New("file reference is required")
+			}
+			out["type"] = "input_file"
+		case "refusal":
+			out["type"] = "refusal"
+			out["refusal"] = part.Refusal
+		default:
+			return nil, fmt.Errorf("content type %q is not supported in responses compatibility mode", part.Type)
+		}
+		if len(part.PromptCacheBreakpoint) > 0 {
+			out["prompt_cache_breakpoint"] = part.PromptCacheBreakpoint
+		}
+		parts = append(parts, out)
+	}
+	return parts, nil
 }

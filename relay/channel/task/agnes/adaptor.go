@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relay/channel"
+	agneschannel "github.com/QuantumNous/new-api/relay/channel/agnes"
 	taskcommon "github.com/QuantumNous/new-api/relay/channel/task/taskcommon"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
@@ -21,11 +23,8 @@ import (
 )
 
 const (
-	videoEndpoint       = "/v1/videos"
-	requestContextKey   = "agnes_video_request"
-	defaultNumFrames    = 121
-	defaultFrameRate    = 24
-	defaultDurationSecs = float64(defaultNumFrames) / float64(defaultFrameRate)
+	videoEndpoint     = "/v1/videos"
+	requestContextKey = "agnes_video_request"
 )
 
 type TaskAdaptor struct {
@@ -38,6 +37,7 @@ type TaskAdaptor struct {
 type agnesVideoResponse struct {
 	ID                 string                 `json:"id,omitempty"`
 	TaskID             string                 `json:"task_id,omitempty"`
+	VideoID            string                 `json:"video_id,omitempty"`
 	Object             string                 `json:"object,omitempty"`
 	Model              string                 `json:"model,omitempty"`
 	Status             string                 `json:"status,omitempty"`
@@ -47,6 +47,8 @@ type agnesVideoResponse struct {
 	Seconds            string                 `json:"seconds,omitempty"`
 	Size               string                 `json:"size,omitempty"`
 	VideoURL           string                 `json:"video_url,omitempty"`
+	URL                string                 `json:"url,omitempty"`
+	SizeMapping        map[string]any         `json:"size_mapping,omitempty"`
 	RemixedFromVideoID string                 `json:"remixed_from_video_id,omitempty"`
 	Video              *agnesVideoData        `json:"video,omitempty"`
 	Content            *agnesVideoContent     `json:"content,omitempty"`
@@ -99,9 +101,6 @@ func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycom
 	if strings.TrimSpace(getString(req, "prompt")) == "" {
 		return service.TaskErrorWrapperLocal(fmt.Errorf("prompt is required"), "invalid_request", http.StatusBadRequest)
 	}
-	if err := validateFrameOptions(req); err != nil {
-		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
-	}
 
 	if info != nil {
 		ensureChannelMeta(info)
@@ -121,7 +120,25 @@ func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycom
 }
 
 func (a *TaskAdaptor) BuildRequestURL(_ *relaycommon.RelayInfo) (string, error) {
-	return fmt.Sprintf("%s%s", strings.TrimRight(a.baseURL, "/"), videoEndpoint), nil
+	return agneschannel.NormalizeBaseURL(a.baseURL) + videoEndpoint, nil
+}
+
+func (a *TaskAdaptor) ValidateMappedRequest(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskError {
+	req, err := getStoredRequest(c)
+	if err == nil {
+		var payload map[string]any
+		payload, err = prepareRequest(req, info)
+		if err == nil && info != nil {
+			info.Action = constant.TaskActionTextGenerate
+			if hasImageInput(payload) || getString(payload, "mode") == "keyframe" || getString(payload, "mode") == "reference" {
+				info.Action = constant.TaskActionGenerate
+			}
+		}
+	}
+	if err != nil {
+		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
+	}
+	return nil
 }
 
 func (a *TaskAdaptor) BuildRequestHeader(_ *gin.Context, req *http.Request, _ *relaycommon.RelayInfo) error {
@@ -137,15 +154,10 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 		return nil, err
 	}
 
-	payload := buildUpstreamRequest(req)
-	modelName := strings.TrimSpace(getString(payload, "model"))
-	if info != nil && info.ChannelMeta != nil && strings.TrimSpace(info.UpstreamModelName) != "" {
-		modelName = strings.TrimSpace(info.UpstreamModelName)
+	payload, err := prepareRequest(req, info)
+	if err != nil {
+		return nil, err
 	}
-	if modelName == "" {
-		modelName = ModelVideoV20
-	}
-	payload["model"] = modelName
 
 	data, err := common.Marshal(payload)
 	if err != nil {
@@ -159,16 +171,20 @@ func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, req
 }
 
 func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (taskID string, taskData []byte, taskErr *dto.TaskError) {
+	defer resp.Body.Close()
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		taskErr = service.TaskErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError)
 		return
 	}
-	_ = resp.Body.Close()
 
 	agnesResp, err := decodeAgnesVideoResponse(responseBody)
 	if err != nil {
 		taskErr = service.TaskErrorWrapper(fmt.Errorf("unmarshal response body failed: %w, body: %s", err, responseBody), "unmarshal_response_body_failed", http.StatusInternalServerError)
+		return
+	}
+	if agnesResp.Error != nil || mapAgnesStatus(agnesResp.Status) == model.TaskStatusFailure {
+		taskErr = service.TaskErrorWrapper(fmt.Errorf("%s", firstNonEmpty(agnesResp.errorMessage(), "video generation failed")), "upstream_error", http.StatusBadGateway)
 		return
 	}
 
@@ -181,6 +197,8 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 	publicTaskID := ""
 	originModelName := ""
 	if info != nil {
+		ensureTaskRelayInfo(info)
+		info.UpstreamVideoID = agnesResp.VideoID
 		originModelName = info.OriginModelName
 		if info.TaskRelayInfo != nil {
 			publicTaskID = info.PublicTaskID
@@ -199,7 +217,16 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 		openAIVideo.Progress = clampProgress(*agnesResp.Progress)
 	}
 	if openAIVideo.Model == "" {
-		openAIVideo.Model = ModelVideoV20
+		openAIVideo.Model = firstNonEmpty(agnesResp.Model, ModelVideoV20)
+	}
+	if openAIVideo.Status == dto.VideoStatusCompleted {
+		openAIVideo.CompletedAt = agnesResp.CompletedAt
+		if resultURL := agnesResp.resultURL(); resultURL != "" {
+			openAIVideo.SetMetadata("url", resultURL)
+		}
+	}
+	if mapping, ok := agnesResp.Metadata["size_mapping"]; ok {
+		openAIVideo.SetMetadata("size_mapping", mapping)
 	}
 
 	c.JSON(http.StatusOK, openAIVideo)
@@ -207,12 +234,19 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 }
 
 func (a *TaskAdaptor) FetchTask(baseURL, key string, body map[string]any, proxy string) (*http.Response, error) {
-	taskID, ok := body["task_id"].(string)
-	if !ok || strings.TrimSpace(taskID) == "" {
-		return nil, fmt.Errorf("invalid task_id")
+	taskID := getString(body, "task_id")
+	videoID := getString(body, "video_id")
+	modelName := getString(body, "model_name")
+	baseURL = agneschannel.NormalizeBaseURL(baseURL)
+	var uri string
+	if videoID != "" {
+		query := url.Values{"video_id": {videoID}, "model_name": {firstNonEmpty(modelName, ModelVideoV20)}}
+		uri = baseURL + "/agnesapi?" + query.Encode()
+	} else if taskID != "" && (modelName == "" || modelName == ModelVideoV20) {
+		uri = baseURL + videoEndpoint + "/" + url.PathEscape(taskID)
+	} else {
+		return nil, fmt.Errorf("missing video_id for Agnes video task")
 	}
-
-	uri := fmt.Sprintf("%s%s/%s", strings.TrimRight(baseURL, "/"), videoEndpoint, strings.TrimSpace(taskID))
 	req, err := http.NewRequest(http.MethodGet, uri, nil)
 	if err != nil {
 		return nil, err
@@ -238,7 +272,15 @@ func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, e
 		taskResult.Progress = progressToString(*agnesResp.Progress)
 	}
 
-	switch mapAgnesStatus(agnesResp.Status) {
+	status := mapAgnesStatus(agnesResp.Status)
+	if status == "" && agnesResp.Error != nil {
+		code, _ := strconv.Atoi(agnesResp.errorCode())
+		if code == http.StatusTooManyRequests || code >= http.StatusInternalServerError {
+			return nil, fmt.Errorf("temporary Agnes retrieval error: %s", agnesResp.errorMessage())
+		}
+		status = model.TaskStatusFailure
+	}
+	switch status {
 	case model.TaskStatusQueued:
 		taskResult.Status = model.TaskStatusQueued
 	case model.TaskStatusInProgress:
@@ -268,30 +310,15 @@ func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, e
 	return taskResult, nil
 }
 
-func (a *TaskAdaptor) EstimateBilling(c *gin.Context, _ *relaycommon.RelayInfo) map[string]float64 {
-	req, err := getStoredRequest(c)
-	if err != nil {
-		return nil
-	}
-	return map[string]float64{
-		"seconds": estimateSeconds(req),
-	}
-}
-
-func (a *TaskAdaptor) AdjustBillingOnSubmit(_ *relaycommon.RelayInfo, taskData []byte) map[string]float64 {
-	agnesResp, err := decodeAgnesVideoResponse(taskData)
-	if err != nil {
-		return nil
-	}
-	if seconds := parsePositiveFloat(agnesResp.Seconds); seconds > 0 {
-		return map[string]float64{"seconds": seconds}
-	}
-	return nil
-}
-
 func (a *TaskAdaptor) ConvertToOpenAIVideo(originTask *model.Task) ([]byte, error) {
 	var agnesResp agnesVideoResponse
-	_ = common.Unmarshal(originTask.Data, &agnesResp)
+	if len(bytes.TrimSpace(originTask.Data)) > 0 {
+		var err error
+		agnesResp, err = decodeAgnesVideoResponse(originTask.Data)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	openAIVideo := dto.NewOpenAIVideo()
 	openAIVideo.ID = originTask.TaskID
@@ -300,13 +327,18 @@ func (a *TaskAdaptor) ConvertToOpenAIVideo(originTask *model.Task) ([]byte, erro
 	openAIVideo.Status = originTask.Status.ToVideoStatus()
 	openAIVideo.SetProgressStr(originTask.Progress)
 	openAIVideo.CreatedAt = firstNonZero(originTask.CreatedAt, agnesResp.CreatedAt)
-	openAIVideo.CompletedAt = firstNonZero(originTask.FinishTime, agnesResp.CompletedAt, originTask.UpdatedAt)
+	if originTask.Status == model.TaskStatusSuccess || originTask.Status == model.TaskStatusFailure {
+		openAIVideo.CompletedAt = firstNonZero(agnesResp.CompletedAt, originTask.FinishTime)
+	}
 	openAIVideo.Seconds = agnesResp.Seconds
 	openAIVideo.Size = agnesResp.Size
 
 	resultURL := firstNonEmpty(originTask.GetResultURL(), agnesResp.resultURL())
-	if resultURL != "" {
+	if resultURL != "" && originTask.Status == model.TaskStatusSuccess {
 		openAIVideo.SetMetadata("url", resultURL)
+	}
+	if mapping, ok := agnesResp.Metadata["size_mapping"]; ok {
+		openAIVideo.SetMetadata("size_mapping", mapping)
 	}
 	if originTask.Status == model.TaskStatusFailure {
 		message := firstNonEmpty(originTask.FailReason, agnesResp.errorMessage())
@@ -356,6 +388,9 @@ func readRequestMap(c *gin.Context) (map[string]any, error) {
 	req := make(map[string]any)
 	if err := common.Unmarshal(body, &req); err != nil {
 		return nil, err
+	}
+	if req == nil {
+		return nil, fmt.Errorf("request must be a JSON object")
 	}
 	return req, nil
 }
@@ -444,10 +479,6 @@ func decodeAgnesVideoResponse(body []byte) (agnesVideoResponse, error) {
 	if err := common.Unmarshal(body, &direct); err != nil {
 		return direct, err
 	}
-	if direct.hasContent() {
-		return direct, nil
-	}
-
 	var wrapped struct {
 		Body     agnesVideoResponse `json:"body,omitempty"`
 		Response struct {
@@ -460,21 +491,35 @@ func decodeAgnesVideoResponse(body []byte) (agnesVideoResponse, error) {
 	if err := common.Unmarshal(body, &wrapped); err != nil {
 		return direct, err
 	}
-	for _, candidate := range []agnesVideoResponse{wrapped.Body, wrapped.Response.Body, wrapped.FinalResponse.Body} {
+	for _, candidate := range []agnesVideoResponse{wrapped.FinalResponse.Body, wrapped.Response.Body, wrapped.Body} {
 		if candidate.hasContent() {
-			return candidate, nil
+			return candidate.normalized(), nil
 		}
 	}
-	return direct, nil
+	return direct.normalized(), nil
+}
+
+func (r agnesVideoResponse) normalized() agnesVideoResponse {
+	if r.SizeMapping != nil {
+		if r.Metadata == nil {
+			r.Metadata = make(map[string]any)
+		}
+		if _, exists := r.Metadata["size_mapping"]; !exists {
+			r.Metadata["size_mapping"] = r.SizeMapping
+		}
+	}
+	return r
 }
 
 func (r agnesVideoResponse) hasContent() bool {
-	return firstNonEmpty(r.ID, r.TaskID, r.Status, r.Model, r.VideoURL, r.RemixedFromVideoID, r.resultURL()) != ""
+	return firstNonEmpty(r.ID, r.TaskID, r.VideoID, r.Status, r.Model, r.VideoURL, r.RemixedFromVideoID, r.resultURL()) != "" || r.Error != nil
 }
 
 func (r agnesVideoResponse) resultURL() string {
-	if url := firstNonEmpty(r.VideoURL, r.RemixedFromVideoID); url != "" && looksLikeURL(url) {
-		return url
+	for _, value := range []string{r.URL, r.VideoURL, r.RemixedFromVideoID} {
+		if looksLikeURL(value) {
+			return strings.TrimSpace(value)
+		}
 	}
 	if r.Video != nil && looksLikeURL(r.Video.URL) {
 		return strings.TrimSpace(r.Video.URL)
@@ -490,9 +535,6 @@ func (r agnesVideoResponse) resultURL() string {
 				return url
 			}
 		}
-	}
-	if url := strings.TrimSpace(r.RemixedFromVideoID); url != "" {
-		return url
 	}
 	return ""
 }
@@ -539,31 +581,6 @@ func toOpenAIVideoStatus(status string, fallback string) string {
 	default:
 		return fallback
 	}
-}
-
-func estimateSeconds(req map[string]any) float64 {
-	if seconds := parsePositiveFloatFromMap(req, "seconds"); seconds > 0 {
-		return seconds
-	}
-	frames := parsePositiveFloatFromMap(req, "num_frames")
-	if frames <= 0 {
-		frames = defaultNumFrames
-	}
-	frameRate := parsePositiveFloatFromMap(req, "frame_rate")
-	if frameRate <= 0 {
-		frameRate = defaultFrameRate
-	}
-	if frameRate <= 0 {
-		return defaultDurationSecs
-	}
-	return frames / frameRate
-}
-
-func parsePositiveFloatFromMap(req map[string]any, key string) float64 {
-	if req == nil {
-		return 0
-	}
-	return parsePositiveFloat(req[key])
 }
 
 func parsePositiveFloat(value any) float64 {

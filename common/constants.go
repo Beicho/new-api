@@ -65,6 +65,9 @@ var EmailDomainWhitelist = []string{
 	"yahoo.com",
 	"foxmail.com",
 }
+var EmailDomainInviteCodeExemptionList = []string{}
+var EmailDomainRegistrationCodeExemptionList = []string{}
+var EmailDomainBlacklist = []string{}
 var EmailLoginAuthServerList = []string{
 	"smtp.sendcloud.net",
 	"smtp.azurecomm.net",

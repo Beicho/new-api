@@ -1318,7 +1318,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 			return &dto.AudioRequest{
 				Model:          model,
 				Input:          "你好，这是一次渠道测试。",
-				Voice:          "cmn-CN-Wavenet-A",
+				Voice:          dto.AudioVoice{Name: "cmn-CN-Wavenet-A"},
 				ResponseFormat: "mp3",
 			}
 		case constant.EndpointTypeAudioTranscription:
@@ -1345,7 +1345,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 				MaxTokens: lo.ToPtr(maxTokens),
 			}
 			if isStream {
-				req.StreamOptions = &dto.StreamOptions{IncludeUsage: true}
+				req.StreamOptions = &dto.StreamOptions{IncludeUsage: common.GetPointer(true)}
 			}
 			return req
 		}
@@ -1408,7 +1408,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 		},
 	}
 	if isStream {
-		testRequest.StreamOptions = &dto.StreamOptions{IncludeUsage: true}
+		testRequest.StreamOptions = &dto.StreamOptions{IncludeUsage: common.GetPointer(true)}
 	}
 
 	if strings.HasPrefix(model, "o") {

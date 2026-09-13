@@ -31,6 +31,8 @@ var imageEditParamOverrideFields = map[string]struct{}{
 	"output_format":      {},
 	"output_compression": {},
 	"partial_images":     {},
+	"stream":             {},
+	"input_fidelity":     {},
 	"watermark":          {},
 	"watermark_enabled":  {},
 	"user_id":            {},

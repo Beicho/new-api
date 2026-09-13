@@ -44,26 +44,20 @@ func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	service.IOCopyBytesGracefully(c, resp, responseBody)
 
 	// compute usage
-	usage := dto.Usage{}
-	if responsesResponse.Usage != nil {
-		usage.PromptTokens = responsesResponse.Usage.InputTokens
-		usage.CompletionTokens = responsesResponse.Usage.OutputTokens
-		usage.TotalTokens = responsesResponse.Usage.TotalTokens
-		if responsesResponse.Usage.InputTokensDetails != nil {
-			usage.PromptTokensDetails.CachedTokens = responsesResponse.Usage.InputTokensDetails.CachedTokens
+	usage := normalizeResponsesUsage(responsesResponse.Usage)
+	if responsesResponse.Usage == nil && info != nil {
+		var text strings.Builder
+		for _, item := range responsesResponse.Output {
+			for _, content := range item.Content {
+				text.WriteString(content.Text)
+			}
+			text.WriteString(item.Arguments)
 		}
+		usage = *service.ResponseText2Usage(c, text.String(), info.UpstreamModelName, info.GetEstimatePromptTokens())
 	}
-	if info == nil || info.ResponsesUsageInfo == nil || info.ResponsesUsageInfo.BuiltInTools == nil {
-		return &usage, nil
-	}
-	// 解析 Tools 用量
-	for _, tool := range responsesResponse.Tools {
-		buildToolinfo, ok := info.ResponsesUsageInfo.BuiltInTools[common.Interface2String(tool["type"])]
-		if !ok || buildToolinfo == nil {
-			logger.LogError(c, fmt.Sprintf("BuiltInTools not found for tool type: %v", tool["type"]))
-			continue
-		}
-		buildToolinfo.CallCount++
+	record := newResponsesToolRecorder(info)
+	for _, item := range responsesResponse.Output {
+		record(item)
 	}
 	return &usage, nil
 }
@@ -78,6 +72,8 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 
 	var usage = &dto.Usage{}
 	var responseTextBuilder strings.Builder
+	var hasUsage, terminal bool
+	record := newResponsesToolRecorder(info)
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 
@@ -85,26 +81,20 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 		var streamResponse dto.ResponsesStreamResponse
 		if err := common.UnmarshalJsonStr(data, &streamResponse); err != nil {
 			logger.LogError(c, "failed to unmarshal stream response: "+err.Error())
-			sr.Error(err)
+			sr.Stop(err)
 			return
 		}
 		sendResponsesStreamData(c, streamResponse, data)
 		switch streamResponse.Type {
-		case "response.completed":
+		case "response.completed", "response.incomplete", "response.failed":
+			terminal = true
 			if streamResponse.Response != nil {
+				for _, item := range streamResponse.Response.Output {
+					record(item)
+				}
 				if streamResponse.Response.Usage != nil {
-					if streamResponse.Response.Usage.InputTokens != 0 {
-						usage.PromptTokens = streamResponse.Response.Usage.InputTokens
-					}
-					if streamResponse.Response.Usage.OutputTokens != 0 {
-						usage.CompletionTokens = streamResponse.Response.Usage.OutputTokens
-					}
-					if streamResponse.Response.Usage.TotalTokens != 0 {
-						usage.TotalTokens = streamResponse.Response.Usage.TotalTokens
-					}
-					if streamResponse.Response.Usage.InputTokensDetails != nil {
-						usage.PromptTokensDetails.CachedTokens = streamResponse.Response.Usage.InputTokensDetails.CachedTokens
-					}
+					*usage = normalizeResponsesUsage(streamResponse.Response.Usage)
+					hasUsage = true
 				}
 				if streamResponse.Response.HasImageGenerationCall() {
 					c.Set("image_generation_call", true)
@@ -112,39 +102,96 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 					c.Set("image_generation_call_size", streamResponse.Response.GetSize())
 				}
 			}
-		case "response.output_text.delta":
+			if streamResponse.Type == "response.failed" {
+				failure := fmt.Errorf("upstream response.failed")
+				if streamResponse.Response != nil && streamResponse.Response.Error != nil {
+					failure = fmt.Errorf("upstream response.failed: %v", streamResponse.Response.Error)
+				}
+				sr.Stop(failure)
+			} else {
+				sr.Done()
+			}
+		case "error", "response.error":
+			terminal = true
+			// The native error event was already delivered. Do not append JSON or retry.
+			sr.Stop(fmt.Errorf("upstream Responses error: %s", data))
+		case "response.output_text.delta", "response.reasoning_text.delta", "response.reasoning_summary_text.delta",
+			"response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
 			// 处理输出文本
 			responseTextBuilder.WriteString(streamResponse.Delta)
 		case dto.ResponsesOutputTypeItemDone:
-			// 函数调用处理
 			if streamResponse.Item != nil {
-				switch streamResponse.Item.Type {
-				case dto.BuildInCallWebSearchCall:
-					if info != nil && info.ResponsesUsageInfo != nil && info.ResponsesUsageInfo.BuiltInTools != nil {
-						if webSearchTool, exists := info.ResponsesUsageInfo.BuiltInTools[dto.BuildInToolWebSearchPreview]; exists && webSearchTool != nil {
-							webSearchTool.CallCount++
-						}
-					}
-				}
+				record(*streamResponse.Item)
 			}
 		}
 	})
 
-	if usage.CompletionTokens == 0 {
-		// 计算输出文本的 token 数量
-		tempStr := responseTextBuilder.String()
-		if len(tempStr) > 0 {
-			// 非正常结束，使用输出文本的 token 数量
-			completionTokens := service.CountTextToken(tempStr, info.UpstreamModelName)
-			usage.CompletionTokens = completionTokens
-		}
+	if !terminal && !info.StreamStatus.HasErrors() {
+		info.StreamStatus.RecordError("Responses stream ended without a terminal event")
 	}
-
-	if usage.PromptTokens == 0 && usage.CompletionTokens != 0 {
-		usage.PromptTokens = info.GetEstimatePromptTokens()
+	if !hasUsage {
+		usage = service.ResponseText2Usage(c, responseTextBuilder.String(), info.UpstreamModelName, info.GetEstimatePromptTokens())
 	}
-
-	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 
 	return usage, nil
+}
+
+func normalizeResponsesUsage(upstream *dto.Usage) dto.Usage {
+	if upstream == nil {
+		return dto.Usage{}
+	}
+	usage := *upstream
+	usage.PromptTokens = upstream.InputTokens
+	usage.CompletionTokens = upstream.OutputTokens
+	if usage.TotalTokens == 0 {
+		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+	}
+	if upstream.InputTokensDetails != nil {
+		usage.PromptTokensDetails = *upstream.InputTokensDetails
+	}
+	if upstream.OutputTokensDetails != nil {
+		usage.CompletionTokenDetails = *upstream.OutputTokensDetails
+	}
+	return usage
+}
+
+// Count executions, not declarations. The item id deduplicates output_item.done
+// against the final response output snapshot.
+func newResponsesToolRecorder(info *relaycommon.RelayInfo) func(dto.ResponsesOutput) {
+	seen := make(map[string]bool)
+	return func(item dto.ResponsesOutput) {
+		if info == nil {
+			return
+		}
+		if item.Status != "" && item.Status != "completed" {
+			return
+		}
+		toolType := ""
+		switch item.Type {
+		case "web_search_call":
+			toolType = dto.BuildInToolWebSearchPreview
+		case "file_search_call":
+			toolType = dto.BuildInToolFileSearch
+		default:
+			return
+		}
+		if item.ID != "" {
+			if seen[item.ID] {
+				return
+			}
+			seen[item.ID] = true
+		}
+		if info.ResponsesUsageInfo == nil {
+			info.ResponsesUsageInfo = &relaycommon.ResponsesUsageInfo{}
+		}
+		if info.ResponsesUsageInfo.BuiltInTools == nil {
+			info.ResponsesUsageInfo.BuiltInTools = make(map[string]*relaycommon.BuildInToolInfo)
+		}
+		tool := info.ResponsesUsageInfo.BuiltInTools[toolType]
+		if tool == nil {
+			tool = &relaycommon.BuildInToolInfo{ToolName: toolType, SearchContextSize: "medium"}
+			info.ResponsesUsageInfo.BuiltInTools[toolType] = tool
+		}
+		tool.CallCount++
+	}
 }

@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relay/channel/openrouter"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
 
@@ -26,9 +28,37 @@ func sendStreamData(c *gin.Context, info *relaycommon.RelayInfo, data string, fo
 	if data == "" {
 		return nil
 	}
+	if !info.ShouldIncludeUsage {
+		var chunk map[string]json.RawMessage
+		if err := common.UnmarshalJsonStr(data, &chunk); err != nil {
+			return err
+		}
+		if _, present := chunk["usage"]; present {
+			delete(chunk, "usage")
+			body, err := common.Marshal(chunk)
+			if err != nil {
+				return err
+			}
+			data = string(body)
+		}
+	}
+	// Legacy completion choices contain text, not chat deltas. Preserve them even
+	// when a channel enables chat response formatting or thinking conversion.
+	if info.RelayMode == relayconstant.RelayModeCompletions {
+		return helper.StringData(c, data)
+	}
 
 	if !forceFormat && !thinkToContent {
 		return helper.StringData(c, data)
+	}
+	if info.ChannelType == constant.ChannelTypeDeepSeek {
+		var envelope dto.SimpleResponse
+		if err := common.UnmarshalJsonStr(data, &envelope); err != nil {
+			return err
+		}
+		if envelope.GetOpenAIError() != nil {
+			return helper.StringData(c, data)
+		}
 	}
 
 	var lastStreamResponse dto.ChatCompletionsStreamResponse
@@ -126,6 +156,7 @@ func OaiStreamHandlerWithDataTransformer(c *gin.Context, info *relaycommon.Relay
 	var streamItems []string // store stream items
 	var lastStreamData string
 	var secondLastStreamData string // 存储倒数第二个stream data，用于音频模型
+	var upstreamStreamError bool
 
 	// 检查是否为音频模型
 	isAudioModel := strings.Contains(strings.ToLower(model), "audio")
@@ -154,6 +185,16 @@ func OaiStreamHandlerWithDataTransformer(c *gin.Context, info *relaycommon.Relay
 
 			lastStreamData = data
 			streamItems = append(streamItems, data)
+			if info.ChannelType == constant.ChannelTypeDeepSeek {
+				var envelope dto.SimpleResponse
+				if err := common.UnmarshalJsonStr(data, &envelope); err != nil {
+					upstreamStreamError = true
+					sr.Stop(err)
+				} else if apiErr := envelope.GetOpenAIError(); apiErr != nil {
+					upstreamStreamError = true
+					sr.Stop(fmt.Errorf("upstream stream error: %s", apiErr.Message))
+				}
+			}
 		}
 	})
 
@@ -200,7 +241,9 @@ func OaiStreamHandlerWithDataTransformer(c *gin.Context, info *relaycommon.Relay
 
 	applyUsagePostProcessing(info, usage, common.StringToByteSlice(lastStreamData))
 
-	HandleFinalResponse(c, info, lastStreamData, responseId, createAt, model, systemFingerprint, usage, containStreamUsage)
+	if !upstreamStreamError {
+		HandleFinalResponse(c, info, lastStreamData, responseId, createAt, model, systemFingerprint, usage, containStreamUsage)
+	}
 
 	return usage, nil
 }
@@ -259,16 +302,29 @@ func OpenaiHandlerWithBodyTransformer(c *gin.Context, info *relaycommon.RelayInf
 	}
 
 	forceFormat := false
-	if info.ChannelSetting.ForceFormat {
+	if info.ChannelSetting.ForceFormat && info.RelayMode != relayconstant.RelayModeCompletions {
 		forceFormat = true
 	}
 
 	usageModified := false
-	if simpleResponse.Usage.PromptTokens == 0 {
+	var usageEnvelope struct {
+		Usage   *dto.Usage `json:"usage"`
+		Choices []struct {
+			Text string `json:"text"`
+		} `json:"choices"`
+	}
+	if err := common.Unmarshal(responseBody, &usageEnvelope); err != nil {
+		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
+	}
+	if usageEnvelope.Usage == nil {
 		completionTokens := simpleResponse.Usage.CompletionTokens
-		if completionTokens == 0 {
+		if info.RelayMode == relayconstant.RelayModeCompletions {
+			for _, choice := range usageEnvelope.Choices {
+				completionTokens += service.CountTextToken(choice.Text, info.UpstreamModelName)
+			}
+		} else if completionTokens == 0 {
 			for _, choice := range simpleResponse.Choices {
-				ctkm := service.CountTextToken(choice.Message.StringContent()+choice.Message.ReasoningContent+choice.Message.Reasoning, info.UpstreamModelName)
+				ctkm := service.CountTextToken(choice.Message.StringContent()+choice.Message.GetReasoningContent()+choice.Message.Reasoning, info.UpstreamModelName)
 				completionTokens += ctkm
 			}
 		}
@@ -361,6 +417,9 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 	}
 
 	info.IsStream = true
+	if info.ChannelType == constant.ChannelTypeOpenAI {
+		return nil, relayRealtimeGA(c, info, func(usage *dto.RealtimeUsage) error { return service.PreWssConsumeQuota(c, info, usage) })
+	}
 	clientConn := info.ClientWs
 	targetConn := info.TargetWs
 
@@ -462,7 +521,10 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 				}
 
 				if realtimeEvent.Type == dto.RealtimeEventTypeResponseDone {
-					realtimeUsage := realtimeEvent.Response.Usage
+					var realtimeUsage *dto.RealtimeUsage
+					if realtimeEvent.Response != nil {
+						realtimeUsage = realtimeEvent.Response.Usage
+					}
 					if realtimeUsage != nil {
 						usage.TotalTokens += realtimeUsage.TotalTokens
 						usage.InputTokens += realtimeUsage.InputTokens
@@ -510,8 +572,9 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 					realtimeSession := realtimeEvent.Session
 					if realtimeSession != nil {
 						// update audio format
-						info.InputAudioFormat = common.GetStringIfEmpty(realtimeSession.InputAudioFormat, info.InputAudioFormat)
-						info.OutputAudioFormat = common.GetStringIfEmpty(realtimeSession.OutputAudioFormat, info.OutputAudioFormat)
+						inputFormat, outputFormat := realtimeSession.AudioFormats()
+						info.InputAudioFormat = common.GetStringIfEmpty(inputFormat, info.InputAudioFormat)
+						info.OutputAudioFormat = common.GetStringIfEmpty(outputFormat, info.OutputAudioFormat)
 					}
 				} else {
 					textToken, audioToken, err := service.CountTokenRealtime(info, *realtimeEvent, info.UpstreamModelName)

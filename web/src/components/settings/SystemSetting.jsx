@@ -31,6 +31,7 @@ import {
   Card,
   Radio,
   Select,
+  Input,
 } from '@douyinfe/semi-ui';
 const { Text } = Typography;
 import {
@@ -44,20 +45,21 @@ import axios from 'axios';
 import { useTranslation } from 'react-i18next';
 import CustomOAuthSetting from './CustomOAuthSetting';
 
-const emailDomainLabelPattern =
-  '[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?';
+const emailDomainLabelPattern = '[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?';
 const emailDomainRegex = new RegExp(
   `^(?:${emailDomainLabelPattern}\\.)+[a-zA-Z]{2,}$`,
 );
 const wildcardEmailDomainRegex = new RegExp(
   `^\\*\\.(?:${emailDomainLabelPattern}\\.)+[a-zA-Z]{2,}$`,
 );
+const topLevelWildcardEmailDomainRegex = /^\*\.[a-zA-Z]{2,}$/;
 
-const normalizeEmailDomain = (domain) =>
-  `${domain ?? ''}`.trim().toLowerCase();
+const normalizeEmailDomain = (domain) => `${domain ?? ''}`.trim().toLowerCase();
 
-const isValidEmailDomainWhitelistItem = (domain) =>
-  emailDomainRegex.test(domain) || wildcardEmailDomainRegex.test(domain);
+const isValidEmailDomainListItem = (domain) =>
+  emailDomainRegex.test(domain) ||
+  wildcardEmailDomainRegex.test(domain) ||
+  topLevelWildcardEmailDomainRegex.test(domain);
 
 const SystemSetting = () => {
   const { t } = useTranslation();
@@ -110,6 +112,9 @@ const SystemSetting = () => {
     SMTPSSLEnabled: '',
     SMTPForceAuthLogin: '',
     EmailDomainWhitelist: [],
+    EmailDomainInviteCodeExemptionList: [],
+    EmailDomainRegistrationCodeExemptionList: [],
+    EmailDomainBlacklist: [],
     TelegramOAuthEnabled: '',
     TelegramBotToken: '',
     TelegramBotName: '',
@@ -134,10 +139,18 @@ const SystemSetting = () => {
   const [isLoaded, setIsLoaded] = useState(false);
   const formApiRef = useRef(null);
   const [emailDomainWhitelist, setEmailDomainWhitelist] = useState([]);
+  const [inviteCodeExemptionList, setInviteCodeExemptionList] = useState([]);
+  const [registrationCodeExemptionList, setRegistrationCodeExemptionList] =
+    useState([]);
+  const [emailDomainBlacklist, setEmailDomainBlacklist] = useState([]);
   const [showPasswordLoginConfirmModal, setShowPasswordLoginConfirmModal] =
     useState(false);
   const [linuxDOOAuthEnabled, setLinuxDOOAuthEnabled] = useState(false);
   const [emailToAdd, setEmailToAdd] = useState('');
+  const [inviteCodeDomainToAdd, setInviteCodeDomainToAdd] = useState('');
+  const [registrationCodeDomainToAdd, setRegistrationCodeDomainToAdd] =
+    useState('');
+  const [blacklistedEmailToAdd, setBlacklistedEmailToAdd] = useState('');
   const [domainFilterMode, setDomainFilterMode] = useState(true);
   const [ipFilterMode, setIpFilterMode] = useState(true);
   const [domainList, setDomainList] = useState([]);
@@ -157,6 +170,17 @@ const SystemSetting = () => {
             break;
           case 'EmailDomainWhitelist':
             setEmailDomainWhitelist(item.value ? item.value.split(',') : []);
+            break;
+          case 'EmailDomainInviteCodeExemptionList':
+            setInviteCodeExemptionList(item.value ? item.value.split(',') : []);
+            break;
+          case 'EmailDomainRegistrationCodeExemptionList':
+            setRegistrationCodeExemptionList(
+              item.value ? item.value.split(',') : [],
+            );
+            break;
+          case 'EmailDomainBlacklist':
+            setEmailDomainBlacklist(item.value ? item.value.split(',') : []);
             break;
           case 'fetch_setting.allow_private_ip':
           case 'fetch_setting.enable_ssrf_protection':
@@ -367,34 +391,65 @@ const SystemSetting = () => {
     }
   };
 
-  const submitEmailDomainWhitelist = async () => {
-    if (!Array.isArray(emailDomainWhitelist)) {
-      showError(t('邮箱域名白名单格式不正确'));
-      return;
-    }
-
+  const normalizeEmailDomainList = (domains) => {
+    if (!Array.isArray(domains)) return null;
     const normalizedDomains = [];
-    for (const item of emailDomainWhitelist) {
+    for (const item of domains) {
       const domain = normalizeEmailDomain(item);
       if (domain === '') {
         continue;
       }
-      if (!isValidEmailDomainWhitelistItem(domain)) {
+      if (!isValidEmailDomainListItem(domain)) {
         showError(
           t('邮箱域名格式不正确，请输入有效的域名，如 gmail.com 或 *.edu.cn'),
         );
-        return;
+        return null;
       }
       if (!normalizedDomains.includes(domain)) {
         normalizedDomains.push(domain);
       }
     }
+    return normalizedDomains;
+  };
 
-    setEmailDomainWhitelist(normalizedDomains);
+  const submitEmailDomainSettings = async () => {
+    const normalizedWhitelist = normalizeEmailDomainList(emailDomainWhitelist);
+    const normalizedInviteCodeList = normalizeEmailDomainList(
+      inviteCodeExemptionList,
+    );
+    const normalizedRegistrationCodeList = normalizeEmailDomainList(
+      registrationCodeExemptionList,
+    );
+    const normalizedBlacklist = normalizeEmailDomainList(emailDomainBlacklist);
+    if (
+      normalizedWhitelist === null ||
+      normalizedInviteCodeList === null ||
+      normalizedRegistrationCodeList === null ||
+      normalizedBlacklist === null
+    ) {
+      return;
+    }
+
+    setEmailDomainWhitelist(normalizedWhitelist);
+    setInviteCodeExemptionList(normalizedInviteCodeList);
+    setRegistrationCodeExemptionList(normalizedRegistrationCodeList);
+    setEmailDomainBlacklist(normalizedBlacklist);
     await updateOptions([
       {
         key: 'EmailDomainWhitelist',
-        value: normalizedDomains.join(','),
+        value: normalizedWhitelist.join(','),
+      },
+      {
+        key: 'EmailDomainInviteCodeExemptionList',
+        value: normalizedInviteCodeList.join(','),
+      },
+      {
+        key: 'EmailDomainRegistrationCodeExemptionList',
+        value: normalizedRegistrationCodeList.join(','),
+      },
+      {
+        key: 'EmailDomainBlacklist',
+        value: normalizedBlacklist.join(','),
       },
     ]);
   };
@@ -439,12 +494,12 @@ const SystemSetting = () => {
     }
   };
 
-  const handleAddEmail = () => {
-    if (emailToAdd && emailToAdd.trim() !== '') {
-      const domain = normalizeEmailDomain(emailToAdd);
+  const handleAddEmailDomain = (value, domains, setDomains, resetValue) => {
+    if (value && value.trim() !== '') {
+      const domain = normalizeEmailDomain(value);
 
       // 验证域名格式
-      if (!isValidEmailDomainWhitelistItem(domain)) {
+      if (!isValidEmailDomainListItem(domain)) {
         showError(
           t('邮箱域名格式不正确，请输入有效的域名，如 gmail.com 或 *.edu.cn'),
         );
@@ -452,17 +507,17 @@ const SystemSetting = () => {
       }
 
       // 检查是否已存在
-      const normalizedWhitelist = emailDomainWhitelist.map((item) =>
+      const normalizedDomains = domains.map((item) =>
         normalizeEmailDomain(item),
       );
-      if (normalizedWhitelist.includes(domain)) {
-        showError(t('该域名已存在于白名单中'));
+      if (normalizedDomains.includes(domain)) {
+        showError(t('该域名已存在于列表中'));
         return;
       }
 
-      setEmailDomainWhitelist([...emailDomainWhitelist, domain]);
-      setEmailToAdd('');
-      showSuccess(t('已添加到白名单'));
+      setDomains([...domains, domain]);
+      resetValue('');
+      showSuccess(t('已添加到列表'));
     }
   };
 
@@ -1275,12 +1330,16 @@ const SystemSetting = () => {
               </Card>
 
               <Card>
-                <Form.Section text={t('配置邮箱域名白名单')}>
-                  <Text>{t('用以防止恶意用户利用临时邮箱批量注册')}</Text>
+                <Form.Section text={t('配置邮箱域名注册')}>
+                  <Text>
+                    {t(
+                      '分别配置免邀请码和免注册码的邮箱域名，列表为空时不豁免；邮箱域名黑名单优先。仅验证邮箱后的密码注册生效。',
+                    )}
+                  </Text>
                   <Row
                     gutter={{ xs: 8, sm: 16, md: 24, lg: 24, xl: 24, xxl: 24 }}
                   >
-                    <Col xs={24} sm={24} md={8} lg={8} xl={8}>
+                    <Col xs={24} sm={12} md={6} lg={6} xl={6}>
                       <Form.Checkbox
                         field='EmailDomainRestrictionEnabled'
                         noLabel
@@ -1291,10 +1350,10 @@ const SystemSetting = () => {
                           )
                         }
                       >
-                        启用邮箱域名白名单
+                        {t('启用邮箱域名白名单')}
                       </Form.Checkbox>
                     </Col>
-                    <Col xs={24} sm={24} md={8} lg={8} xl={8}>
+                    <Col xs={24} sm={12} md={6} lg={6} xl={6}>
                       <Form.Checkbox
                         field='EmailAliasRestrictionEnabled'
                         noLabel
@@ -1305,24 +1364,25 @@ const SystemSetting = () => {
                           )
                         }
                       >
-                        启用邮箱别名限制
+                        {t('启用邮箱别名限制')}
                       </Form.Checkbox>
                     </Col>
-                    <Col xs={24} sm={24} md={8} lg={8} xl={8}>
+                    <Col xs={24} sm={12} md={6} lg={6} xl={6}>
                       <Form.Checkbox
                         field='EmailCaseInsensitiveEnabled'
                         noLabel
                         onChange={(e) =>
-                          handleCheckboxChange(
-                            'EmailCaseInsensitiveEnabled',
-                            e,
-                          )
+                          handleCheckboxChange('EmailCaseInsensitiveEnabled', e)
                         }
                       >
                         {t('邮箱用户名大小写不敏感')}
                       </Form.Checkbox>
                     </Col>
                   </Row>
+
+                  <div style={{ marginTop: 16 }}>
+                    <Text>{t('允许注册的邮箱域名白名单')}</Text>
+                  </div>
                   <TagInput
                     value={emailDomainWhitelist}
                     onChange={setEmailDomainWhitelist}
@@ -1340,18 +1400,158 @@ const SystemSetting = () => {
                       <Button
                         theme='solid'
                         type='primary'
-                        onClick={handleAddEmail}
+                        onClick={() =>
+                          handleAddEmailDomain(
+                            emailToAdd,
+                            emailDomainWhitelist,
+                            setEmailDomainWhitelist,
+                            setEmailToAdd,
+                          )
+                        }
                       >
                         {t('添加')}
                       </Button>
                     }
-                    onEnterPress={handleAddEmail}
+                    onEnterPress={() =>
+                      handleAddEmailDomain(
+                        emailToAdd,
+                        emailDomainWhitelist,
+                        setEmailDomainWhitelist,
+                        setEmailToAdd,
+                      )
+                    }
+                  />
+
+                  <div style={{ marginTop: 20 }}>
+                    <Text>{t('免邀请码注册邮箱域名')}</Text>
+                  </div>
+                  <TagInput
+                    value={inviteCodeExemptionList}
+                    onChange={setInviteCodeExemptionList}
+                    placeholder={t('输入域名后回车')}
+                    style={{ width: '100%', marginTop: 8 }}
+                  />
+                  <Input
+                    placeholder={t(
+                      '输入可免邀请码注册的邮箱域名，如 example.com 或 *.edu.cn',
+                    )}
+                    value={inviteCodeDomainToAdd}
+                    onChange={setInviteCodeDomainToAdd}
+                    style={{ marginTop: 16 }}
+                    suffix={
+                      <Button
+                        theme='solid'
+                        type='primary'
+                        onClick={() =>
+                          handleAddEmailDomain(
+                            inviteCodeDomainToAdd,
+                            inviteCodeExemptionList,
+                            setInviteCodeExemptionList,
+                            setInviteCodeDomainToAdd,
+                          )
+                        }
+                      >
+                        {t('添加')}
+                      </Button>
+                    }
+                    onEnterPress={() =>
+                      handleAddEmailDomain(
+                        inviteCodeDomainToAdd,
+                        inviteCodeExemptionList,
+                        setInviteCodeExemptionList,
+                        setInviteCodeDomainToAdd,
+                      )
+                    }
+                  />
+
+                  <div style={{ marginTop: 20 }}>
+                    <Text>{t('免注册码注册邮箱域名')}</Text>
+                  </div>
+                  <TagInput
+                    value={registrationCodeExemptionList}
+                    onChange={setRegistrationCodeExemptionList}
+                    placeholder={t('输入域名后回车')}
+                    style={{ width: '100%', marginTop: 8 }}
+                  />
+                  <Input
+                    placeholder={t(
+                      '输入可免注册码注册的邮箱域名，如 example.com 或 *.edu.cn',
+                    )}
+                    value={registrationCodeDomainToAdd}
+                    onChange={setRegistrationCodeDomainToAdd}
+                    style={{ marginTop: 16 }}
+                    suffix={
+                      <Button
+                        theme='solid'
+                        type='primary'
+                        onClick={() =>
+                          handleAddEmailDomain(
+                            registrationCodeDomainToAdd,
+                            registrationCodeExemptionList,
+                            setRegistrationCodeExemptionList,
+                            setRegistrationCodeDomainToAdd,
+                          )
+                        }
+                      >
+                        {t('添加')}
+                      </Button>
+                    }
+                    onEnterPress={() =>
+                      handleAddEmailDomain(
+                        registrationCodeDomainToAdd,
+                        registrationCodeExemptionList,
+                        setRegistrationCodeExemptionList,
+                        setRegistrationCodeDomainToAdd,
+                      )
+                    }
+                  />
+
+                  <div style={{ marginTop: 20 }}>
+                    <Text>{t('邮箱域名黑名单')}</Text>
+                  </div>
+                  <TagInput
+                    value={emailDomainBlacklist}
+                    onChange={setEmailDomainBlacklist}
+                    placeholder={t('输入域名后回车')}
+                    style={{ width: '100%', marginTop: 8 }}
+                  />
+                  <Form.Input
+                    placeholder={t(
+                      '输入禁止注册的邮箱域名，如 disposable.com 或 *.hdu.edu.cn',
+                    )}
+                    value={blacklistedEmailToAdd}
+                    onChange={(value) => setBlacklistedEmailToAdd(value)}
+                    style={{ marginTop: 16 }}
+                    suffix={
+                      <Button
+                        theme='solid'
+                        type='primary'
+                        onClick={() =>
+                          handleAddEmailDomain(
+                            blacklistedEmailToAdd,
+                            emailDomainBlacklist,
+                            setEmailDomainBlacklist,
+                            setBlacklistedEmailToAdd,
+                          )
+                        }
+                      >
+                        {t('添加')}
+                      </Button>
+                    }
+                    onEnterPress={() =>
+                      handleAddEmailDomain(
+                        blacklistedEmailToAdd,
+                        emailDomainBlacklist,
+                        setEmailDomainBlacklist,
+                        setBlacklistedEmailToAdd,
+                      )
+                    }
                   />
                   <Button
-                    onClick={submitEmailDomainWhitelist}
+                    onClick={submitEmailDomainSettings}
                     style={{ marginTop: 10 }}
                   >
-                    {t('保存邮箱域名白名单设置')}
+                    {t('保存邮箱域名注册设置')}
                   </Button>
                 </Form.Section>
               </Card>

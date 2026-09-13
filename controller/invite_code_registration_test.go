@@ -10,6 +10,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/oauth"
 	"github.com/QuantumNous/new-api/setting"
@@ -24,6 +25,12 @@ import (
 type registrationAPIResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
+}
+
+type inviteCodeAPIResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	Data    string `json:"data"`
 }
 
 type inviteTestSession struct {
@@ -82,6 +89,9 @@ func setupInviteRegistrationControllerTestDB(t *testing.T) *gorm.DB {
 	originalPasswordRegisterEnabled := common.PasswordRegisterEnabled
 	originalEmailVerificationEnabled := common.EmailVerificationEnabled
 	originalEmailCaseInsensitiveEnabled := common.EmailCaseInsensitiveEnabled
+	originalInviteCodeExemptionList := common.EmailDomainInviteCodeExemptionList
+	originalRegistrationCodeExemptionList := common.EmailDomainRegistrationCodeExemptionList
+	originalEmailDomainBlacklist := append([]string(nil), common.EmailDomainBlacklist...)
 	originalGenerateDefaultToken := constant.GenerateDefaultToken
 	originalQuotaForNewUser := common.QuotaForNewUser
 	originalQuotaForInviter := common.QuotaForInviter
@@ -98,6 +108,9 @@ func setupInviteRegistrationControllerTestDB(t *testing.T) *gorm.DB {
 	common.PasswordRegisterEnabled = true
 	common.EmailVerificationEnabled = false
 	common.EmailCaseInsensitiveEnabled = true
+	common.EmailDomainInviteCodeExemptionList = nil
+	common.EmailDomainRegistrationCodeExemptionList = nil
+	common.EmailDomainBlacklist = nil
 	constant.GenerateDefaultToken = false
 	common.QuotaForNewUser = 0
 	common.QuotaForInviter = 0
@@ -125,6 +138,9 @@ func setupInviteRegistrationControllerTestDB(t *testing.T) *gorm.DB {
 		common.PasswordRegisterEnabled = originalPasswordRegisterEnabled
 		common.EmailVerificationEnabled = originalEmailVerificationEnabled
 		common.EmailCaseInsensitiveEnabled = originalEmailCaseInsensitiveEnabled
+		common.EmailDomainInviteCodeExemptionList = originalInviteCodeExemptionList
+		common.EmailDomainRegistrationCodeExemptionList = originalRegistrationCodeExemptionList
+		common.EmailDomainBlacklist = originalEmailDomainBlacklist
 		constant.GenerateDefaultToken = originalGenerateDefaultToken
 		common.QuotaForNewUser = originalQuotaForNewUser
 		common.QuotaForInviter = originalQuotaForInviter
@@ -158,6 +174,13 @@ func requireRegistrationUserMissing(t *testing.T, db *gorm.DB, username string) 
 	require.Zero(t, count)
 }
 
+func inviteRegistrationTestCode(t *testing.T) string {
+	t.Helper()
+	code, err := common.GenerateInviteCode()
+	require.NoError(t, err)
+	return code
+}
+
 func TestPasswordRegistrationRequiresValidInviteCodeAndRollsBack(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := setupInviteRegistrationControllerTestDB(t)
@@ -171,7 +194,7 @@ func TestPasswordRegistrationRequiresValidInviteCodeAndRollsBack(t *testing.T) {
 		DisplayName: "inviter",
 		Role:        common.RoleCommonUser,
 		Status:      common.UserStatusEnabled,
-		AffCode:     "VALID-AFF",
+		AffCode:     inviteRegistrationTestCode(t),
 	}
 	require.NoError(t, db.Create(&inviter).Error)
 
@@ -186,7 +209,7 @@ func TestPasswordRegistrationRequiresValidInviteCodeAndRollsBack(t *testing.T) {
 	invalidInvite := registerTestUser(t, gin.H{
 		"username": "invalid-invite",
 		"password": "password123",
-		"aff_code": "UNKNOWN",
+		"aff_code": "ABCD",
 	})
 	require.False(t, invalidInvite.Success)
 	require.Contains(t, invalidInvite.Message, "邀请码无效")
@@ -196,7 +219,7 @@ func TestPasswordRegistrationRequiresValidInviteCodeAndRollsBack(t *testing.T) {
 	disabledInviter := registerTestUser(t, gin.H{
 		"username": "disabled-inviter",
 		"password": "password123",
-		"aff_code": inviter.AffCode,
+		"aff_code": strings.ToLower(inviter.AffCode),
 	})
 	require.False(t, disabledInviter.Success)
 	require.Contains(t, disabledInviter.Message, "邀请码无效")
@@ -212,6 +235,7 @@ func TestPasswordRegistrationRequiresValidInviteCodeAndRollsBack(t *testing.T) {
 	var invitedUser model.User
 	require.NoError(t, db.Where("username = ?", "valid-invite").First(&invitedUser).Error)
 	require.Equal(t, inviter.Id, invitedUser.InviterId)
+	require.True(t, common.IsValidInviteCode(invitedUser.AffCode))
 
 	cfg.RegistrationCodeRequired = true
 	registrationCode := model.RegistrationCode{
@@ -244,6 +268,256 @@ func TestPasswordRegistrationRequiresValidInviteCodeAndRollsBack(t *testing.T) {
 	require.Equal(t, inviter.Id, registeredUser.InviterId)
 	require.NoError(t, db.First(&registrationCode, registrationCode.Id).Error)
 	require.Equal(t, 1, registrationCode.UsedCount)
+}
+
+func TestGetAffCodeRepairsLegacyCodeAndKeepsV2Code(t *testing.T) {
+	db := setupInviteRegistrationControllerTestDB(t)
+	user := model.User{
+		Username:    "legacy-aff-code-user",
+		Password:    "password123",
+		DisplayName: "legacy-aff-code-user",
+		Role:        common.RoleCommonUser,
+		Status:      common.UserStatusEnabled,
+		AffCode:     "OLD1",
+	}
+	require.NoError(t, db.Create(&user).Error)
+
+	requestAffCode := func() inviteCodeAPIResponse {
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Set("id", user.Id)
+		GetAffCode(ctx)
+		var response inviteCodeAPIResponse
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+		return response
+	}
+
+	first := requestAffCode()
+	require.True(t, first.Success)
+	require.True(t, common.IsValidInviteCode(first.Data))
+	require.NotEqual(t, "OLD1", first.Data)
+	second := requestAffCode()
+	require.True(t, second.Success)
+	require.Equal(t, first.Data, second.Data)
+}
+
+func TestDomainEmailRegistrationExemptionsAreIndependent(t *testing.T) {
+	for _, tt := range []struct {
+		name             string
+		email            string
+		inviteList       []string
+		registrationList []string
+		provideInvite    bool
+		provideCode      bool
+		verification     string
+		wantMessage      string
+	}{
+		{name: "empty lists require invite", wantMessage: "请输入邀请码"},
+		{name: "empty lists require registration", provideInvite: true, wantMessage: "请输入注册码"},
+		{name: "empty lists allow valid codes", provideInvite: true, provideCode: true},
+		{name: "invite exemption still needs registration", inviteList: []string{"*.trusted.test"}, wantMessage: "请输入注册码"},
+		{name: "invite exemption allows registration code", inviteList: []string{"*.trusted.test"}, provideCode: true},
+		{name: "registration exemption still needs invite", registrationList: []string{"*.trusted.test"}, wantMessage: "请输入邀请码"},
+		{name: "registration exemption allows invite", registrationList: []string{"*.trusted.test"}, provideInvite: true},
+		{name: "different domains invite only", inviteList: []string{"*.trusted.test"}, registrationList: []string{"other.test"}, wantMessage: "请输入注册码"},
+		{name: "different domains registration only", email: "user@other.test", inviteList: []string{"*.trusted.test"}, registrationList: []string{"other.test"}, wantMessage: "请输入邀请码"},
+		{name: "both exemptions retain supplied codes", inviteList: []string{"*.trusted.test"}, registrationList: []string{"*.trusted.test"}, provideInvite: true, provideCode: true},
+		{name: "missing verification", inviteList: []string{"*.trusted.test"}, registrationList: []string{"*.trusted.test"}, verification: "missing", wantMessage: i18n.MsgUserEmailVerificationRequired},
+		{name: "invalid verification", inviteList: []string{"*.trusted.test"}, registrationList: []string{"*.trusted.test"}, verification: "invalid", wantMessage: i18n.MsgUserVerificationCodeError},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			db := setupInviteRegistrationControllerTestDB(t)
+			cfg := setting.GetEnhancementSetting()
+			cfg.InviteCodeRequired = true
+			cfg.RegistrationCodeRequired = true
+			common.EmailVerificationEnabled = true
+			common.EmailDomainInviteCodeExemptionList = tt.inviteList
+			common.EmailDomainRegistrationCodeExemptionList = tt.registrationList
+			inviter := model.User{
+				Username: "inviter", Password: "password123", DisplayName: "inviter",
+				Role: common.RoleCommonUser, Status: common.UserStatusEnabled,
+				AffCode: inviteRegistrationTestCode(t),
+			}
+			require.NoError(t, db.Create(&inviter).Error)
+			code := model.RegistrationCode{
+				Code: "VALID-REGISTRATION", Status: common.RegistrationCodeStatusEnabled,
+				Name: "test", MaxUses: 1, CreatedTime: common.GetTimestamp(),
+			}
+			require.NoError(t, db.Create(&code).Error)
+			email := tt.email
+			if email == "" {
+				email = "user@mail.trusted.test"
+			}
+			common.RegisterVerificationCodeWithKey(common.NormalizeEmailIdentity(email), "123456", common.EmailVerificationPurpose)
+			t.Cleanup(func() {
+				common.DeleteKey(common.NormalizeEmailIdentity(email), common.EmailVerificationPurpose)
+			})
+			payload := gin.H{
+				"username": "domain-user", "password": "password123",
+				"email": email, "verification_code": "123456",
+			}
+			if tt.provideInvite {
+				payload["aff_code"] = inviter.AffCode
+			}
+			if tt.provideCode {
+				payload["registration_code"] = code.Code
+			}
+			if tt.verification == "missing" {
+				delete(payload, "verification_code")
+			} else if tt.verification == "invalid" {
+				payload["verification_code"] = "000000"
+			}
+			response := registerTestUser(t, payload)
+			if tt.wantMessage != "" {
+				require.False(t, response.Success)
+				require.Contains(t, response.Message, tt.wantMessage)
+				requireRegistrationUserMissing(t, db, "domain-user")
+				require.NoError(t, db.First(&code, code.Id).Error)
+				require.Zero(t, code.UsedCount)
+				return
+			}
+			require.True(t, response.Success, response.Message)
+			var user model.User
+			require.NoError(t, db.Where("username = ?", "domain-user").First(&user).Error)
+			require.Equal(t, email, user.Email)
+			if tt.provideInvite {
+				require.Equal(t, inviter.Id, user.InviterId)
+			} else {
+				require.Zero(t, user.InviterId)
+			}
+			require.NoError(t, db.First(&code, code.Id).Error)
+			var usages int64
+			require.NoError(t, db.Model(&model.RegistrationCodeUsage{}).Count(&usages).Error)
+			if tt.provideCode {
+				require.Equal(t, 1, code.UsedCount)
+				require.EqualValues(t, 1, usages)
+			} else {
+				require.Zero(t, code.UsedCount)
+				require.Zero(t, usages)
+			}
+		})
+	}
+}
+
+func TestDomainEmailRegistrationBypassesInviteAndRegistrationCodes(t *testing.T) {
+	db := setupInviteRegistrationControllerTestDB(t)
+	cfg := setting.GetEnhancementSetting()
+	cfg.InviteCodeRequired = true
+	cfg.RegistrationCodeRequired = true
+	common.EmailVerificationEnabled = true
+	common.EmailDomainInviteCodeExemptionList = []string{"*.trusted.test"}
+	common.EmailDomainRegistrationCodeExemptionList = []string{"*.trusted.test"}
+	common.EmailDomainBlacklist = []string{"*.blocked.trusted.test"}
+
+	const verificationCode = "123456"
+	domainEmail := "user@mail.trusted.test"
+	common.RegisterVerificationCodeWithKey(
+		common.NormalizeEmailIdentity(domainEmail),
+		verificationCode,
+		common.EmailVerificationPurpose,
+	)
+	t.Cleanup(func() {
+		common.DeleteKey(common.NormalizeEmailIdentity(domainEmail), common.EmailVerificationPurpose)
+	})
+
+	response := registerTestUser(t, gin.H{
+		"username":          "domain-user",
+		"password":          "password123",
+		"email":             domainEmail,
+		"verification_code": verificationCode,
+	})
+	require.True(t, response.Success, response.Message)
+
+	var user model.User
+	require.NoError(t, db.Where("username = ?", "domain-user").First(&user).Error)
+	require.Zero(t, user.InviterId)
+	require.Equal(t, domainEmail, user.Email)
+
+	var usages int64
+	require.NoError(t, db.Model(&model.RegistrationCodeUsage{}).Count(&usages).Error)
+	require.Zero(t, usages)
+}
+
+func TestDomainEmailRegistrationRejectsBlacklistedDomain(t *testing.T) {
+	db := setupInviteRegistrationControllerTestDB(t)
+	cfg := setting.GetEnhancementSetting()
+	cfg.InviteCodeRequired = true
+	cfg.RegistrationCodeRequired = true
+	common.EmailVerificationEnabled = true
+	common.EmailDomainInviteCodeExemptionList = []string{"*.trusted.test"}
+	common.EmailDomainRegistrationCodeExemptionList = []string{"*.trusted.test"}
+	common.EmailDomainBlacklist = []string{"*.blocked.trusted.test"}
+
+	const verificationCode = "123456"
+	blacklistedEmail := "user@mail.blocked.trusted.test"
+	common.RegisterVerificationCodeWithKey(
+		common.NormalizeEmailIdentity(blacklistedEmail),
+		verificationCode,
+		common.EmailVerificationPurpose,
+	)
+	t.Cleanup(func() {
+		common.DeleteKey(common.NormalizeEmailIdentity(blacklistedEmail), common.EmailVerificationPurpose)
+	})
+
+	response := registerTestUser(t, gin.H{
+		"username":          "blocked-user",
+		"password":          "password123",
+		"email":             blacklistedEmail,
+		"verification_code": verificationCode,
+	})
+	require.False(t, response.Success)
+	require.Equal(t, i18n.MsgUserEmailDomainBlacklisted, response.Message)
+	requireRegistrationUserMissing(t, db, "blocked-user")
+}
+
+func TestUnconfiguredDomainEmailStillRequiresInviteCode(t *testing.T) {
+	db := setupInviteRegistrationControllerTestDB(t)
+	cfg := setting.GetEnhancementSetting()
+	cfg.InviteCodeRequired = true
+	cfg.RegistrationCodeRequired = true
+	common.EmailVerificationEnabled = true
+	common.EmailDomainInviteCodeExemptionList = []string{"*.trusted.test"}
+	common.EmailDomainRegistrationCodeExemptionList = []string{"*.trusted.test"}
+
+	const verificationCode = "123456"
+	unconfiguredEmail := "user@example.com"
+	common.RegisterVerificationCodeWithKey(
+		common.NormalizeEmailIdentity(unconfiguredEmail),
+		verificationCode,
+		common.EmailVerificationPurpose,
+	)
+	t.Cleanup(func() {
+		common.DeleteKey(common.NormalizeEmailIdentity(unconfiguredEmail), common.EmailVerificationPurpose)
+	})
+
+	response := registerTestUser(t, gin.H{
+		"username":          "unconfigured-user",
+		"password":          "password123",
+		"email":             unconfiguredEmail,
+		"verification_code": verificationCode,
+	})
+	require.False(t, response.Success)
+	require.Contains(t, response.Message, "请输入邀请码")
+	requireRegistrationUserMissing(t, db, "unconfigured-user")
+}
+
+func TestUnverifiedDomainEmailCannotBypassRegistrationCodes(t *testing.T) {
+	db := setupInviteRegistrationControllerTestDB(t)
+	cfg := setting.GetEnhancementSetting()
+	cfg.InviteCodeRequired = true
+	cfg.RegistrationCodeRequired = true
+	common.EmailVerificationEnabled = false
+	common.EmailDomainInviteCodeExemptionList = []string{"*.trusted.test"}
+	common.EmailDomainRegistrationCodeExemptionList = []string{"*.trusted.test"}
+
+	response := registerTestUser(t, gin.H{
+		"username": "unverified-user",
+		"password": "password123",
+		"email":    "user@mail.trusted.test",
+	})
+	require.False(t, response.Success)
+	require.Contains(t, response.Message, "请输入邀请码")
+	requireRegistrationUserMissing(t, db, "unverified-user")
 }
 
 func TestPasswordRegistrationTreatsEmailCaseVariantsAsOneIdentity(t *testing.T) {
@@ -305,7 +579,7 @@ func TestOAuthRegistrationRequiresInviteCodeButExistingLoginDoesNot(t *testing.T
 		DisplayName: "oauth-inviter",
 		Role:        common.RoleCommonUser,
 		Status:      common.UserStatusEnabled,
-		AffCode:     "OAUTH-AFF",
+		AffCode:     inviteRegistrationTestCode(t),
 	}
 	require.NoError(t, db.Create(&inviter).Error)
 
@@ -326,6 +600,7 @@ func TestOAuthRegistrationRequiresInviteCodeButExistingLoginDoesNot(t *testing.T
 	require.NoError(t, err)
 	require.Equal(t, inviter.Id, createdUser.InviterId)
 	require.Equal(t, oauthUser.ProviderUserID, createdUser.DiscordId)
+	require.True(t, common.IsValidInviteCode(createdUser.AffCode))
 
 	existingUser, err := findOrCreateOAuthUser(nil, provider, oauthUser, newInviteTestSession(nil))
 	require.NoError(t, err)
@@ -431,7 +706,7 @@ func TestWeChatRegistrationRequiresInviteCodeButExistingLoginDoesNot(t *testing.
 		DisplayName: "wechat-inviter",
 		Role:        common.RoleCommonUser,
 		Status:      common.UserStatusEnabled,
-		AffCode:     "WECHAT-AFF",
+		AffCode:     inviteRegistrationTestCode(t),
 	}
 	require.NoError(t, db.Create(&inviter).Error)
 
@@ -484,6 +759,7 @@ func TestWeChatRegistrationRequiresInviteCodeButExistingLoginDoesNot(t *testing.
 	var createdUser model.User
 	require.NoError(t, db.Where("wechat_id = ?", "wechat-new-user").First(&createdUser).Error)
 	require.Equal(t, inviter.Id, createdUser.InviterId)
+	require.True(t, common.IsValidInviteCode(createdUser.AffCode))
 
 	existingLogin := requestWeChat("/api/oauth/wechat?code=valid")
 	require.True(t, existingLogin.Success)

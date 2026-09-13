@@ -65,13 +65,18 @@ import { StatusContext } from '../../context/Status';
 import { useTranslation } from 'react-i18next';
 import { SiDiscord } from 'react-icons/si';
 
+const INVITE_CODE_LENGTH = 16;
+
+const normalizeInviteCodeInput = (value) => (value || '').trim().toUpperCase();
+
 const getInitialInviteCode = () => {
   const queryCode = new URLSearchParams(window.location.search).get('aff');
   if (queryCode) {
-    localStorage.setItem('aff', queryCode);
-    return queryCode;
+    const normalizedCode = normalizeInviteCodeInput(queryCode);
+    localStorage.setItem('aff', normalizedCode);
+    return normalizedCode;
   }
-  return localStorage.getItem('aff') || '';
+  return normalizeInviteCodeInput(localStorage.getItem('aff'));
 };
 
 const RegisterForm = () => {
@@ -154,12 +159,29 @@ const RegisterForm = () => {
     affCode: inputs.aff_code,
   };
 
-  const ensureRequiredRegistrationCodes = () => {
-    if (inviteCodeRequired && !inputs.aff_code.trim()) {
+  const ensureRequiredRegistrationCodes = (
+    allowDomainEmailRegistration = false,
+  ) => {
+    // The server checks domain eligibility after verifying email ownership.
+    const allowDomainExemptions =
+      allowDomainEmailRegistration && status.email_verification;
+    const deferInviteCodeCheck =
+      allowDomainExemptions && status.domain_email_no_invite_code;
+    const deferRegistrationCodeCheck =
+      allowDomainExemptions && status.domain_email_no_registration_code;
+    if (
+      inviteCodeRequired &&
+      !deferInviteCodeCheck &&
+      !inputs.aff_code.trim()
+    ) {
       showInfo(t('请输入邀请码'));
       return false;
     }
-    if (registrationCodeRequired && !inputs.registration_code.trim()) {
+    if (
+      registrationCodeRequired &&
+      !deferRegistrationCodeCheck &&
+      !inputs.registration_code.trim()
+    ) {
       showInfo(t('请输入注册码'));
       return false;
     }
@@ -248,11 +270,14 @@ const RegisterForm = () => {
 
   function handleChange(name, value) {
     if (name === 'aff_code') {
-      if (value) {
-        localStorage.setItem('aff', value);
+      const normalizedCode = normalizeInviteCodeInput(value);
+      if (normalizedCode) {
+        localStorage.setItem('aff', normalizedCode);
       } else {
         localStorage.removeItem('aff');
       }
+      setInputs((inputs) => ({ ...inputs, [name]: normalizedCode }));
+      return;
     }
     setInputs((inputs) => ({ ...inputs, [name]: value }));
   }
@@ -267,7 +292,7 @@ const RegisterForm = () => {
       return;
     }
     if (username && password) {
-      if (!ensureRequiredRegistrationCodes()) {
+      if (!ensureRequiredRegistrationCodes(true)) {
         return;
       }
       if (turnstileEnabled && turnstileToken === '') {
@@ -475,6 +500,7 @@ const RegisterForm = () => {
                   name='aff_code'
                   value={inputs.aff_code}
                   onChange={(value) => handleChange('aff_code', value)}
+                  maxLength={INVITE_CODE_LENGTH}
                   prefix={<IconKey />}
                 />
                 <Form.Input
@@ -729,6 +755,7 @@ const RegisterForm = () => {
                   name='aff_code'
                   value={inputs.aff_code}
                   onChange={(value) => handleChange('aff_code', value)}
+                  maxLength={INVITE_CODE_LENGTH}
                   prefix={<IconKey />}
                 />
 

@@ -237,7 +237,7 @@ data: {"type":"conversation.response.done","usage":{"input_tokens":15,"output_to
 	var response dto.OpenAITextResponse
 	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
 	require.Equal(t, "tool_calls", response.Choices[0].FinishReason)
-	require.Equal(t, "Calling tool", response.Choices[0].Message.ReasoningContent)
+	require.Equal(t, "Calling tool", response.Choices[0].Message.GetReasoningContent())
 	require.Empty(t, response.Choices[0].Message.StringContent())
 	toolCalls := response.Choices[0].Message.ParseToolCalls()
 	require.Len(t, toolCalls, 1)

@@ -2,6 +2,7 @@ package relay
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -171,6 +172,16 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 	if err := helper.ModelMappedHelper(c, info, nil); err != nil {
 		return nil, service.TaskErrorWrapperLocal(err, "model_mapping_failed", http.StatusBadRequest)
 	}
+	// Provider-version validation must use the mapped upstream model, and run
+	// before pre-consumption or creating a billable upstream task.
+	if validator, ok := adaptor.(interface {
+		ValidateMappedRequest(*gin.Context, *relaycommon.RelayInfo) *dto.TaskError
+	}); ok {
+		if taskErr := validator.ValidateMappedRequest(c, info); taskErr != nil {
+			return nil, taskErr
+		}
+	}
+	info.UpstreamVideoID = ""
 
 	// 3. 预生成公开 task ID（仅首次）
 	if info.PublicTaskID == "" {
@@ -396,7 +407,7 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
 
 	isOpenAIVideoAPI := strings.HasPrefix(c.Request.RequestURI, "/v1/videos/")
 
-	// Gemini/Vertex 支持实时查询：用户 fetch 时直接从上游拉取最新状态
+	// Gemini/Vertex/Agnes 支持实时查询：用户 fetch 时直接从上游拉取最新状态
 	if realtimeResp := tryRealtimeFetch(originTask, isOpenAIVideoAPI); len(realtimeResp) > 0 {
 		respBody = realtimeResp
 		return
@@ -434,8 +445,8 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
 	return
 }
 
-// tryRealtimeFetch 尝试从上游实时拉取 Gemini/Vertex 任务状态。
-// 仅当渠道类型为 Gemini 或 Vertex 时触发；其他渠道或出错时返回 nil。
+// tryRealtimeFetch 尝试从上游实时拉取 Gemini/Vertex/Agnes 任务状态。
+// Agnes 使用共享的状态持久化和结算流程；其他渠道或出错时返回 nil。
 // 当非 OpenAI Video API 时，还会构建自定义格式的响应体。
 func tryRealtimeFetch(task *model.Task, isOpenAIVideoAPI bool) []byte {
 	channelModel, err := model.GetChannelById(task.ChannelId, true)
@@ -455,6 +466,12 @@ func tryRealtimeFetch(task *model.Task, isOpenAIVideoAPI bool) []byte {
 	proxy := channelModel.GetSetting().Proxy
 	adaptor := GetTaskAdaptor(constant.TaskPlatform(strconv.Itoa(channelModel.Type)))
 	if adaptor == nil {
+		return nil
+	}
+	if channelModel.Type == constant.ChannelTypeAgnesAI {
+		// Do not let a foreground query write a terminal status without applying
+		// the refund/settlement that the background poller would perform.
+		_ = service.RefreshVideoTask(context.Background(), adaptor, channelModel, task)
 		return nil
 	}
 

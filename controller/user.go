@@ -186,6 +186,10 @@ func Register(c *gin.Context) {
 			common.ApiErrorI18n(c, i18n.MsgUserEmailVerificationRequired)
 			return
 		}
+		if common.IsEmailDomainBlacklisted(user.Email) {
+			common.ApiErrorI18n(c, i18n.MsgUserEmailDomainBlacklisted)
+			return
+		}
 		if !common.VerifyCodeWithKey(common.NormalizeEmailIdentity(user.Email), user.VerificationCode, common.EmailVerificationPurpose) {
 			common.ApiErrorI18n(c, i18n.MsgUserVerificationCodeError)
 			return
@@ -202,7 +206,11 @@ func Register(c *gin.Context) {
 		return
 	}
 	affCode := user.AffCode // this code is the inviter's code, not the user's own code
-	inviterId, err := model.ResolveInviterIdByAffCode(affCode, setting.IsInviteCodeRequired())
+	inviteCodeExempt := common.EmailVerificationEnabled && common.IsDomainEmailInviteCodeExempt(user.Email)
+	registrationCodeExempt := common.EmailVerificationEnabled && common.IsDomainEmailRegistrationCodeExempt(user.Email)
+	inviteCodeRequired := setting.IsInviteCodeRequired() && !inviteCodeExempt
+	registrationCodeRequired := setting.IsRegistrationCodeRequired() && !registrationCodeExempt
+	inviterId, err := model.ResolveInviterIdByAffCode(affCode, inviteCodeRequired)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -221,7 +229,7 @@ func Register(c *gin.Context) {
 		if err := cleanUser.InsertWithTx(tx, inviterId); err != nil {
 			return err
 		}
-		if err := model.ConsumeRegistrationCodeTx(tx, user.RegistrationCode, cleanUser.Id, cleanUser.Username, "password", setting.IsRegistrationCodeRequired()); err != nil {
+		if err := model.ConsumeRegistrationCodeTx(tx, user.RegistrationCode, cleanUser.Id, cleanUser.Username, "password", registrationCodeRequired); err != nil {
 			return err
 		}
 		if constant.GenerateDefaultToken {
@@ -422,20 +430,18 @@ func GetAffCode(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	if user.AffCode == "" {
-		user.AffCode = common.GetRandomString(4)
-		if err := user.Update(false); err != nil {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": err.Error(),
-			})
-			return
-		}
+	affCode, err := model.EnsureUserInviteCode(user)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
-		"data":    user.AffCode,
+		"data":    affCode,
 	})
 	return
 }
@@ -1012,6 +1018,11 @@ type BatchDisableRelatedUsersRequest struct {
 	SelectAllRelated *bool  `json:"select_all_related,omitempty"`
 }
 
+type BatchManageUsersRequest struct {
+	Action string `json:"action"`
+	Reason string `json:"reason,omitempty"`
+}
+
 func BatchDisableRelatedUsers(c *gin.Context) {
 	var req BatchDisableRelatedUsersRequest
 	if err := common.DecodeJson(c.Request.Body, &req); err != nil {
@@ -1032,6 +1043,20 @@ func BatchDisableRelatedUsers(c *gin.Context) {
 		c.GetInt("id"),
 		c.GetInt("role"),
 	)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, result)
+}
+
+func BatchManageUsers(c *gin.Context) {
+	var req BatchManageUsersRequest
+	if err := common.DecodeJson(c.Request.Body, &req); err != nil {
+		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+		return
+	}
+	result, err := enhancement.BatchManageUsers(req.Action, req.Reason, c.GetInt("id"), c.GetInt("role"))
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -1217,6 +1242,10 @@ func EmailBind(c *gin.Context) {
 	}
 	email := strings.TrimSpace(req.Email)
 	code := req.Code
+	if common.IsEmailDomainBlacklisted(email) {
+		common.ApiErrorI18n(c, i18n.MsgUserEmailDomainBlacklisted)
+		return
+	}
 	if !common.VerifyCodeWithKey(common.NormalizeEmailIdentity(email), code, common.EmailVerificationPurpose) {
 		common.ApiErrorI18n(c, i18n.MsgUserVerificationCodeError)
 		return

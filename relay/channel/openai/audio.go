@@ -19,6 +19,9 @@ import (
 )
 
 func OpenaiTTSHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) *dto.Usage {
+	if info.ChannelType == constant.ChannelTypeOpenAI && info.IsStream {
+		return openAIMediaStreamHandler(c, resp, info)
+	}
 	// the status code has been judged before, if there is a body reading failure,
 	// it should be regarded as a non-recoverable error, so it should not return err for external retry.
 	// Analogous to nginx's load balancing, it will only retry if it can't be requested or
@@ -112,6 +115,13 @@ func OpenaiTTSHandler(c *gin.Context, resp *http.Response, info *relaycommon.Rel
 }
 
 func OpenaiSTTHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, responseFormat string) (*types.NewAPIError, *dto.Usage) {
+	if info.ChannelType == constant.ChannelTypeOpenAI {
+		if info.IsStream {
+			return nil, openAIMediaStreamHandler(c, resp, info)
+		}
+		usage, err := openAIMediaJSONHandler(c, resp, info)
+		return err, usage
+	}
 	defer service.CloseResponseBodyGracefully(resp)
 
 	responseBody, err := io.ReadAll(resp.Body)

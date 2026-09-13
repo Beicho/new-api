@@ -1,13 +1,15 @@
 package helper
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
@@ -69,9 +71,12 @@ func GetAndValidateOpenAILocalSearchRequest(c *gin.Context) (*dto.OpenAILocalSea
 
 func GetAndValidAudioRequest(c *gin.Context, relayMode int) (*dto.AudioRequest, error) {
 	audioRequest := &dto.AudioRequest{}
-	err := common.UnmarshalBodyReusable(c, audioRequest)
+	err := unmarshalOpenAIMediaRequest(c, audioRequest)
 	if err != nil {
 		return nil, err
+	}
+	if common.GetContextKeyInt(c, constant.ContextKeyChannelType) != constant.ChannelTypeOpenAI && audioRequest.Voice.ID != "" {
+		return nil, errors.New("custom voice objects are only supported by the official OpenAI channel")
 	}
 	switch relayMode {
 	case relayconstant.RelayModeAudioSpeech:
@@ -135,10 +140,22 @@ func GetAndValidateResponsesRequest(c *gin.Context) (*dto.OpenAIResponsesRequest
 	if request.Model == "" {
 		return nil, errors.New("model is required")
 	}
-	if request.Input == nil {
+	channelType := common.GetContextKeyInt(c, constant.ContextKeyChannelType)
+	if channelType == constant.ChannelTypeOpenAI && request.Background != nil && *request.Background {
+		return nil, ValidateResponsesBackground(request.Background)
+	}
+	if request.Input == nil && channelType != constant.ChannelTypeOpenAI && !(channelType == constant.ChannelTypeDeepSeek &&
+		len(request.Instructions) > 0 && string(request.Instructions) != "null") {
 		return nil, errors.New("input is required")
 	}
 	return request, nil
+}
+
+func ValidateResponsesBackground(background *bool) *types.NewAPIError {
+	if background != nil && *background {
+		return types.NewErrorWithStatusCode(errors.New("background=true is not supported: response retrieval and deferred settlement are unavailable"), types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+	}
+	return nil
 }
 
 func GetAndValidateResponsesCompactionRequest(c *gin.Context) (*dto.OpenAIResponsesCompactionRequest, error) {
@@ -154,6 +171,15 @@ func GetAndValidateResponsesCompactionRequest(c *gin.Context) (*dto.OpenAIRespon
 
 func GetAndValidOpenAIImageRequest(c *gin.Context, relayMode int) (*dto.ImageRequest, error) {
 	imageRequest := &dto.ImageRequest{}
+	if common.GetContextKeyInt(c, constant.ContextKeyChannelType) == constant.ChannelTypeOpenAI {
+		if err := unmarshalOpenAIMediaRequest(c, imageRequest); err != nil {
+			return nil, err
+		}
+		if imageRequest.Model == "" {
+			return nil, errors.New("model is required")
+		}
+		return imageRequest, nil
+	}
 
 	switch relayMode {
 	case relayconstant.RelayModeImagesEdits:
@@ -169,7 +195,7 @@ func GetAndValidOpenAIImageRequest(c *gin.Context, relayMode int) (*dto.ImageReq
 			imageRequest.Quality = formData.Get("quality")
 			imageRequest.Size = formData.Get("size")
 			if imageValue := formData.Get("image"); imageValue != "" {
-				imageRequest.Image, _ = json.Marshal(imageValue)
+				imageRequest.Image, _ = common.Marshal(imageValue)
 			}
 
 			if imageRequest.Model == "gpt-image-1" {
@@ -240,6 +266,54 @@ func GetAndValidOpenAIImageRequest(c *gin.Context, relayMode int) (*dto.ImageReq
 	return imageRequest, nil
 }
 
+// Multipart values are strings on the wire. Parse the scalar fields needed for
+// relay dispatch without changing the original form forwarded to the provider.
+func unmarshalOpenAIMediaRequest(c *gin.Context, request any) error {
+	if !strings.Contains(c.GetHeader("Content-Type"), "multipart/form-data") {
+		return common.UnmarshalBodyReusable(c, request)
+	}
+	form, err := common.ParseMultipartFormReusable(c)
+	if err != nil {
+		return err
+	}
+	defer form.RemoveAll()
+	fields := make(map[string]any)
+	for key, values := range form.Value {
+		if len(values) != 1 {
+			fields[key] = values
+			continue
+		}
+		value := values[0]
+		switch key {
+		case "stream", "watermark":
+			parsed, err := strconv.ParseBool(value)
+			if err != nil {
+				return fmt.Errorf("%s must be a boolean", key)
+			}
+			fields[key] = parsed
+		case "n", "partial_images", "output_compression":
+			parsed, err := strconv.ParseUint(value, 10, 64)
+			if err != nil {
+				return fmt.Errorf("%s must be a non-negative integer", key)
+			}
+			fields[key] = parsed
+		case "speed":
+			parsed, err := strconv.ParseFloat(value, 64)
+			if err != nil {
+				return fmt.Errorf("%s must be a number", key)
+			}
+			fields[key] = parsed
+		default:
+			fields[key] = value
+		}
+	}
+	body, err := common.Marshal(fields)
+	if err != nil {
+		return err
+	}
+	return common.Unmarshal(body, request)
+}
+
 func GetAndValidateClaudeRequest(c *gin.Context) (textRequest *dto.ClaudeRequest, err error) {
 	textRequest = &dto.ClaudeRequest{}
 	err = common.UnmarshalBodyReusable(c, textRequest)
@@ -265,6 +339,15 @@ func GetAndValidateTextRequest(c *gin.Context, relayMode int) (*dto.GeneralOpenA
 	err := common.UnmarshalBodyReusable(c, textRequest)
 	if err != nil {
 		return nil, err
+	}
+	if textRequest.LogProbs != nil {
+		if relayMode == relayconstant.RelayModeCompletions {
+			if textRequest.LogProbs.Int == nil {
+				return nil, errors.New("logprobs must be an integer for completions")
+			}
+		} else if textRequest.LogProbs.Bool == nil {
+			return nil, errors.New("logprobs must be a boolean for chat completions")
+		}
 	}
 
 	if relayMode == relayconstant.RelayModeModerations && textRequest.Model == "" {

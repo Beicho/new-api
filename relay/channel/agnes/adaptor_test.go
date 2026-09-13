@@ -49,8 +49,8 @@ func TestConvertImageRequestBuildsAgnesExtraBody(t *testing.T) {
 		ResponseFormat string   `json:"response_format"`
 		Image          []string `json:"image"`
 		ExtraBody      struct {
-			Image          any    `json:"image"`
-			ResponseFormat string `json:"response_format"`
+			Image          []string `json:"image"`
+			ResponseFormat string   `json:"response_format"`
 		} `json:"extra_body"`
 	}
 	if err := common.Unmarshal(data, &payload); err != nil {
@@ -69,11 +69,11 @@ func TestConvertImageRequestBuildsAgnesExtraBody(t *testing.T) {
 	if payload.ResponseFormat != "" {
 		t.Fatalf("top-level response_format = %q, want omitted", payload.ResponseFormat)
 	}
-	if len(payload.Image) != 1 || payload.Image[0] != "https://example.com/input.png" {
+	if len(payload.Image) != 0 {
 		t.Fatalf("image = %#v", payload.Image)
 	}
-	if payload.ExtraBody.Image != nil {
-		t.Fatalf("extra_body.image = %#v, want omitted", payload.ExtraBody.Image)
+	if len(payload.ExtraBody.Image) != 1 || payload.ExtraBody.Image[0] != "https://example.com/input.png" {
+		t.Fatalf("extra_body.image = %#v", payload.ExtraBody.Image)
 	}
 	if payload.ExtraBody.ResponseFormat != "url" {
 		t.Fatalf("extra_body.response_format = %q", payload.ExtraBody.ResponseFormat)
@@ -120,14 +120,16 @@ func TestConvertImageEditsRequestMapsTopLevelImage(t *testing.T) {
 	}
 
 	var payload struct {
-		Image []string `json:"image"`
+		ExtraBody struct {
+			Image []string `json:"image"`
+		} `json:"extra_body"`
 	}
 	if err := common.Unmarshal(data, &payload); err != nil {
 		t.Fatalf("unmarshal converted payload: %v", err)
 	}
 
-	if len(payload.Image) != 1 || payload.Image[0] != "https://example.com/edit-source.png" {
-		t.Fatalf("image = %#v", payload.Image)
+	if len(payload.ExtraBody.Image) != 1 || payload.ExtraBody.Image[0] != "https://example.com/edit-source.png" {
+		t.Fatalf("image = %#v", payload.ExtraBody.Image)
 	}
 }
 
@@ -231,9 +233,16 @@ func TestGetModelListIncludesCurrentAgnesModels(t *testing.T) {
 	for _, model := range []string{
 		ModelText15Flash,
 		ModelText20Flash,
+		ModelText25Flash,
+		ModelText25ProBeta,
+		ModelText25Pro,
+		ModelText30Flash,
 		ModelImage20Flash,
 		ModelImage21Flash,
+		ModelImage25Flash,
 		ModelVideoV20,
+		ModelVideo25,
+		ModelVideo25Flash,
 	} {
 		if !seen[model] {
 			t.Fatalf("model list missing %s", model)

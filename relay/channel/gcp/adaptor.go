@@ -106,7 +106,7 @@ func convertSpeechRequest(c *gin.Context, info *relaycommon.RelayInfo, request d
 
 	voice := mapFromAny(body["voice"])
 	if len(voice) == 0 {
-		voiceName := mapOpenAIVoiceToGCP(request.Voice)
+		voiceName := mapOpenAIVoiceToGCP(request.Voice.String())
 		voice = map[string]any{
 			"languageCode": languageCodeFromVoiceName(voiceName, defaultTTSLanguageCode),
 			"name":         voiceName,
